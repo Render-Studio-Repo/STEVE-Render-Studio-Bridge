@@ -7,8 +7,10 @@ from urllib.request import Request, urlopen
 from .transport import host_target
 from .version import VERSION
 
-RELEASES = "https://github.com/10-X-eng/STEVE/releases"
-API = "https://api.github.com/repos/10-X-eng/STEVE/releases?per_page=30"
+# This bridge build follows releases from its own fork. Pointing at upstream here
+# could replace the Render Studio bridge with a stock STEVE update.
+RELEASES = "https://github.com/wprojects/STEVE-Render-Studio-Bridge/releases"
+API = "https://api.github.com/repos/wprojects/STEVE-Render-Studio-Bridge/releases?per_page=30"
 PLATFORMS = {"x86_64-pc-windows-msvc": "windows-x64", "aarch64-apple-darwin": "macos-arm64"}
 INTERVAL = 12 * 60 * 60
 

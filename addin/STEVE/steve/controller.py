@@ -339,6 +339,14 @@ class Controller:
                                     if self.state["busy"] and entry[:3] == (self.client, self.thread_id, self.turn_id)],
                     "canSteer": bool(self.turn_id and self.state["busy"] and not self._cancel)}
 
+    def bridge_readiness(self):
+        """Return the small, sanitized readiness shape used by the local bridge."""
+        with self._lock:
+            return {
+                "providerReady": self.state.get("connection") == "ready" and bool(self.state.get("account")),
+                "busy": bool(self.state.get("busy") or self.state.get("jobBusy") or self._send_queued),
+            }
+
     def emit(self, force=True):
         if self._closed:
             return

@@ -1,5 +1,12 @@
 # STEVE
 
+> **Render Studio bridge edition.** This community fork adds an authenticated,
+> loopback-only bridge so [Render](https://render3d.app) can queue design prompts
+> into STEVE while Fusion remains the execution host. It defaults to the current
+> Fusion Data Panel folder; callers can optionally choose an existing Autodesk
+> project/folder and a design name. This is an add-on integration for Render and
+> is not an official 10-X-eng release. See [bridge setup and security](docs/EXTERNAL_BRIDGE.md).
+
 ## Your engineering partner inside Autodesk Fusion
 
 **Describe what you want. Build it inside Autodesk Fusion.**

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 START_HERE = {
     ".exe": (
         f"STEVE {VERSION} - Windows preview\n\n"
+        "Render Studio bridge edition. This community add-on is not an official 10-X-eng release.\n\n"
         "1. Extract the entire zip into a folder.\n"
         "2. Save your work and close Fusion.\n"
         "3. Double-click Install STEVE.exe and choose Install STEVE.\n"
@@ -34,6 +35,7 @@ START_HERE = {
     ),
     "": (
         f"STEVE {VERSION} - macOS preview (Apple silicon)\n\n"
+        "Render Studio bridge edition. This community add-on is not an official 10-X-eng release.\n\n"
         "1. Extract the entire zip into a folder.\n"
         "2. Save your work and quit Fusion.\n"
         "3. Open Terminal, type: bash  (with a space), drag \"Install STEVE.command\" into the window, and press Return.\n"

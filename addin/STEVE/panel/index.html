@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'">
   <title>STEVE · Your engineering partner</title>
-  <link rel="stylesheet" href="style.css?v=6">
+  <link rel="stylesheet" href="style.css?v=7">
   <link rel="stylesheet" href="fusion.css?v=21">
   <script src="markdown.js?v=1" defer></script>
   <script src="images.js?v=3" defer></script>
   <script src="gallery.js?v=1" defer></script>
-  <script src="panel.js?v=37" defer></script>
+  <script src="panel.js?v=38" defer></script>
 </head>
 <body>
   <div id="app" class="app signed-out">
@@ -210,6 +210,12 @@
     <h2 id="update-confirm-heading">Update &amp; restart STEVE?</h2>
     <p>STEVE will now restart to install the update. Fusion and your documents will stay open. The panel will briefly close, then reopen with your current chat. Your sign-in and saved chats are kept. If work is still running, STEVE waits for it to finish before restarting.</p>
     <div class="job-actions"><button id="confirm-update" type="button" class="primary-button">Update &amp; restart STEVE</button><button id="cancel-update" type="button" class="secondary-button">Cancel</button></div>
+  </dialog>
+  <dialog id="external-bridge-pairing" class="job-dialog" aria-labelledby="external-bridge-heading">
+    <div class="job-heading"><div><span class="eyebrow">Local connection request</span><h2 id="external-bridge-heading">Connect Render Studio?</h2></div></div>
+    <p>Render Studio is asking to send CAD prompts to this copy of STEVE. Approving connects the browser on this computer. It does not share your Autodesk or AI-provider credentials.</p>
+    <p class="job-note">Only approve if you just chose Connect STEVE in Render Studio.</p>
+    <div class="job-actions"><button id="external-bridge-approve" type="button" class="primary-button">Approve connection</button><button id="external-bridge-deny" type="button" class="secondary-button">Deny</button></div>
   </dialog>
   <dialog id="job-dialog" class="job-dialog" aria-labelledby="job-heading">
     <div class="job-heading"><div><span class="eyebrow">Keep working toward an outcome</span><h2 id="job-heading">Your job</h2></div><button id="job-close" type="button" class="icon-button" aria-label="Close job controls">×</button></div>

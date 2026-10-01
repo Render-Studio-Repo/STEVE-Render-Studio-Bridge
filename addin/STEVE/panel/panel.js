@@ -477,6 +477,10 @@ function renderControls() {
   const custom=local || openai;
   const signed=!!state.account && (!(local || claude || openai) || state.models.length>0);
   const hasMessages=state.messages.length>0 && signed;
+  const pairing=state.externalBridge;
+  const pairingDialog=$("external-bridge-pairing");
+  if(pairing?.phase==="pairing_pending" && !pairingDialog.open)pairingDialog.showModal();
+  if(pairing?.phase!=="pairing_pending" && pairingDialog.open)pairingDialog.close();
   $("app").classList.toggle("signed-out",!signed);
   $("welcome").hidden=hasMessages || !!state.runtimeIssue;
   $("runtime-setup").hidden=!state.runtimeIssue;
@@ -994,6 +998,16 @@ $("image-files").onchange=(event)=>{const files=Array.from(event.target.files||[
 $("close-image").onclick=()=>$("image-viewer").close();
 $("image-viewer").onclick=(event)=>{if(event.target===$("image-viewer"))$("image-viewer").close();};
 $("image-viewer").onclose=()=>$("expanded-image").removeAttribute("src");
+$("external-bridge-approve").onclick=async()=>{
+  const pairingId=state.externalBridge?.pairingId;if(!pairingId)return;
+  $("external-bridge-approve").disabled=true;$("external-bridge-deny").disabled=true;
+  try{await act("externalBridgeApprove",{pairingId});}finally{$("external-bridge-approve").disabled=false;$("external-bridge-deny").disabled=false;}
+};
+$("external-bridge-deny").onclick=async()=>{
+  const pairingId=state.externalBridge?.pairingId;if(!pairingId)return;
+  $("external-bridge-approve").disabled=true;$("external-bridge-deny").disabled=true;
+  try{await act("externalBridgeDeny",{pairingId});}finally{$("external-bridge-approve").disabled=false;$("external-bridge-deny").disabled=false;}
+};
 $("composer").onsubmit=async(event)=>{
   event.preventDefault();const text=$("message").value.trim();
   const jobCommand=/^\/jobs(?:\s|$)/.test(text);

@@ -14,10 +14,12 @@ from .steve.transport import data_home
 from .steve.upgrade import migrate_data
 from .steve.app_update import launch_live_update
 from .steve.update_transaction import write_json
+from .steve.external_bridge import ExternalBridge, submission_message
 
 COMMAND_ID = "10X_STEVE_Open"
 PALETTE_ID = "10X_STEVE_Panel"
 EVENT_ID = "10X_STEVE_State"
+BRIDGE_EVENT_ID = "10X_STEVE_ExternalBridge"
 _app = None
 _controller = None
 _fusion_tools = None
@@ -34,6 +36,7 @@ _event_pending = False
 _running = False
 _want_visible = False
 _update_wake_stop = threading.Event()
+_external_bridge = None
 
 
 def _log_error():
@@ -45,14 +48,17 @@ def _log_error():
 
 def _publish(state):
     global _pending_state, _event_pending
+    bridge_status = _external_bridge.status() if _external_bridge else None
     with _pending_lock:
-        _pending_state = state
+        _pending_state = {**state, "externalBridge": bridge_status}
         if _event_pending or not _running:
             return
         _event_pending = True
     # Autodesk's supported exception for notifying the Fusion thread.
     try:
         _app.fireCustomEvent(EVENT_ID)
+        if _external_bridge and bridge_status and not bridge_status["busy"] and bridge_status["queueDepth"]:
+            _app.fireCustomEvent(BRIDGE_EVENT_ID)
     except RuntimeError:
         with _pending_lock:
             _event_pending = False
@@ -120,6 +126,39 @@ class StateEvent(adsk.core.CustomEventHandler):
                         launch_live_update(_app, helper)
                     except Exception as error:
                         _controller.update_launch_failed(str(error))
+
+
+def _dispatch_bridge_commands(bridge, controller, fusion_tools):
+    commands = bridge.drain_commands()
+    if controller.state.get("busy"):
+        bridge.requeue_commands(commands)
+        return
+    for index, command in enumerate(commands):
+        if command.kind == "submit":
+            accepted = controller.dispatch("send", {"text": submission_message(command.submission)},
+                                           capture_context=fusion_tools.message_context)
+            if accepted is False:
+                bridge.requeue_commands(commands[index:])
+            else:
+                bridge.requeue_commands(commands[index + 1:])
+            return
+
+
+def _bridge_readiness():
+    controller = _controller
+    if not controller:
+        return {"fusionRunning": bool(_running), "providerReady": False, "busy": False}
+    return {"fusionRunning": bool(_running), **controller.bridge_readiness()}
+
+
+class ExternalBridgeEvent(adsk.core.CustomEventHandler):
+    def notify(self, args):
+        try:
+            if _external_bridge and _controller and _fusion_tools:
+                _dispatch_bridge_commands(_external_bridge, _controller, _fusion_tools)
+                _publish(_controller.snapshot())
+        except Exception:
+            _log_error()
 
 
 def _read_pasted_image(request_id, controller):
@@ -190,6 +229,18 @@ class HTMLMessage(adsk.core.HTMLEventHandler):
                 event.returnData = json.dumps({"ok": True, "images": _controller.image_assets(payload.get("ids"))})
             elif event.action == "saveConcept":
                 event.returnData = json.dumps({"ok": True, **_controller.save_concept(payload.get("id"))})
+            elif event.action == "externalBridgeStatus":
+                event.returnData = json.dumps({"ok": True, **_external_bridge.status()})
+            elif event.action in {"externalBridgeApprove", "externalBridgeDeny"}:
+                pairing_id = payload.get("pairingId")
+                if not isinstance(pairing_id, str):
+                    raise ValueError("Invalid pairing request.")
+                if event.action == "externalBridgeApprove":
+                    _external_bridge.approve_pairing(pairing_id)
+                else:
+                    _external_bridge.deny_pairing(pairing_id)
+                _publish(_controller.snapshot())
+                event.returnData = json.dumps({"ok": True, **_external_bridge.status()})
             else:
                 accepted = _controller.dispatch(event.action, payload, capture_context=_fusion_tools.message_context)
                 if accepted is False:
@@ -246,7 +297,7 @@ class WorkspaceActivated(adsk.core.WorkspaceEventHandler):
 
 
 def run(context):
-    global _app, _controller, _running, _fusion_tools
+    global _app, _controller, _running, _fusion_tools, _external_bridge
     try:
         _app = adsk.core.Application.get()
         try:
@@ -257,6 +308,8 @@ def run(context):
         _running = True
         custom = _app.registerCustomEvent(EVENT_ID)
         _bind(custom, StateEvent(), _handlers)
+        bridge_event = _app.registerCustomEvent(BRIDGE_EVENT_ID)
+        _bind(bridge_event, ExternalBridgeEvent(), _handlers)
         ui = _app.userInterface
         definition = ui.commandDefinitions.addButtonDefinition(
             COMMAND_ID, "STEVE", "Open your engineering & visualization expert",
@@ -273,6 +326,13 @@ def run(context):
         _bind(ui.workspaceActivated, WorkspaceActivated(), _handlers)
         _fusion_tools = FusionTools(_app)
         _controller = Controller(_publish, fusion_tools=_fusion_tools)
+        _external_bridge = ExternalBridge(lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID), readiness=_bridge_readiness)
+        try:
+            _external_bridge.start()
+        except OSError as error:
+            _app.log(f"STEVE external bridge unavailable: {error}")
+            _external_bridge.close()
+            _external_bridge = None
         _controller.dispatch("connect")
         handoff_file = data_home() / 'update-handoff.json'
         if handoff_file.is_file():
@@ -299,10 +359,13 @@ def run(context):
 
 
 def stop(context):
-    global _running, _controller, _palette, _want_visible, _event_pending, _fusion_tools, _pending_clipboard, _clipboard_busy, _pending_gallery, _gallery_busy
+    global _running, _controller, _palette, _want_visible, _event_pending, _fusion_tools, _pending_clipboard, _clipboard_busy, _pending_gallery, _gallery_busy, _external_bridge
     _running = False
     _update_wake_stop.set()
     _want_visible = False
+    if _external_bridge:
+        _external_bridge.close()
+        _external_bridge = None
     if _controller:
         _controller.close()
         _controller = None
@@ -328,6 +391,7 @@ def stop(context):
         if definition:
             definition.deleteMe()
         _app.unregisterCustomEvent(EVENT_ID)
+        _app.unregisterCustomEvent(BRIDGE_EVENT_ID)
     _event_pending = False
     _pending_clipboard = None
     _clipboard_busy = False
