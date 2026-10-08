@@ -58,6 +58,7 @@ class Submission:
     render_project_id: str | None = None
     render_user_id: str | None = None
     binding_revision: str | None = None
+    reply_to_request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class BridgeCommand:
     version: int
     kind: str
     submission: Submission
+    reply_target: tuple[str, str] | None = None
 
 
 def submission_message(submission, managed_save=False):
@@ -113,7 +115,7 @@ def _text(value, field, maximum, required=False):
 
 
 def _submission(payload, request_id):
-    if not isinstance(payload, dict) or set(payload) - {"prompt", "projectId", "folderId", "designName", "renderProjectId", "renderUserId", "bindingRevision"}:
+    if not isinstance(payload, dict) or set(payload) - {"prompt", "projectId", "folderId", "designName", "renderProjectId", "renderUserId", "bindingRevision", "replyToRequestId"}:
         raise BridgeError(400, "invalid_request", "Invalid submission fields.")
     if bool(payload.get('renderProjectId')) != bool(payload.get('renderUserId')):
         raise BridgeError(400, "invalid_request", "Render project and user IDs must be supplied together.")
@@ -126,6 +128,8 @@ def _submission(payload, request_id):
         render_project_id=_text(payload.get('renderProjectId'), 'renderProjectId', 256),
         render_user_id=_text(payload.get('renderUserId'), 'renderUserId', 256),
         binding_revision=_text(payload.get('bindingRevision'), 'bindingRevision', 128),
+        reply_to_request_id=_text(payload.get('replyToRequestId'), 'replyToRequestId', MAX_REQUEST_ID_CHARS,
+                                  required='replyToRequestId' in payload),
     )
 
 
@@ -287,7 +291,7 @@ class ExternalBridge:
                 "busy": bool(readiness.get("busy", False)),
                 "ready": bool(self._secret) and bool(readiness.get("providerReady", False)),
                 "pairingId": state.pairing_id,
-                "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "projectBinding": True, "livePreview": self.preview is not None, "storageSettings": self.storage is not None, "autoSave": self.storage is not None, "autoReadOnly": False},
+                "capabilities": {"authPing": True, "submitPrompt": True, "replyToRequest": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "projectBinding": True, "livePreview": self.preview is not None, "storageSettings": self.storage is not None, "autoSave": self.storage is not None, "autoReadOnly": False},
                 "queueDepth": len(self._commands),
             }
 
@@ -568,8 +572,19 @@ class ExternalBridge:
                 raise BridgeError(409, 'request_id_conflict', 'The request ID already belongs to retained history.')
             if len(self._commands) >= MAX_QUEUE_SIZE:
                 raise BridgeError(429, "queue_full", "STEVE's submission queue is full.")
-            self.feed.accept(submission.request_id, submission.prompt, submission.render_project_id, submission.render_user_id)
-            self._commands.append(BridgeCommand(PROTOCOL_VERSION, "submit", submission))
+            target = None
+            if submission.reply_to_request_id is not None:
+                try:
+                    previous = self.feed.read(submission.reply_to_request_id, 0)['snapshot']
+                except KeyError:
+                    raise BridgeError(404, 'request_not_found', 'The reply request is unknown or expired.') from None
+                self._require_project(previous.get('renderUserId'), previous.get('renderProjectId'))
+                target = (previous.get('provider'), previous.get('threadId'))
+                if not all(isinstance(value, str) and value.strip() for value in target):
+                    raise BridgeError(409, 'conversation_unavailable', 'The reply request has no linked native conversation yet.')
+            self.feed.accept(submission.request_id, submission.prompt, submission.render_project_id, submission.render_user_id,
+                             reply_to_request_id=submission.reply_to_request_id, reply_target=target)
+            self._commands.append(BridgeCommand(PROTOCOL_VERSION, "submit", submission, target))
             self._requests[submission.request_id] = body_hash
             while len(self._requests) > IDEMPOTENCY_CACHE_SIZE:
                 self._requests.popitem(last=False)

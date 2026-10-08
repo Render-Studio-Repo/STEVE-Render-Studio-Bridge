@@ -16,6 +16,40 @@ from steve.render_project import ProjectBinding, RenderProject
 
 
 class ProjectTests(unittest.TestCase):
+    def test_explicit_reply_scope_target_and_idempotency(self):
+        from steve.external_bridge import _submission
+        bridge = ExternalBridge(lambda: None)
+        binding = self.bind(bridge)
+        payload = dict(prompt='Follow up', renderUserId='alice', renderProjectId='one',
+                       bindingRevision=binding['revision'], replyToRequestId='original')
+        reply = _submission(payload, 'reply')
+        with self.assertRaises(BridgeError) as missing:
+            bridge._enqueue(reply, 'hash')
+        self.assertEqual((missing.exception.status, missing.exception.code), (404, 'request_not_found'))
+        for user, project in [('bob', 'one'), ('alice', 'two')]:
+            bridge.feed.accept('original', 'Other', project, user)
+            self.error('project_mismatch', lambda: bridge._enqueue(reply, 'hash'))
+        bridge.feed.accept('original', 'Owned', 'one', 'alice')
+        self.error('conversation_unavailable', lambda: bridge._enqueue(reply, 'hash'))
+        self.assertEqual(bridge.drain_commands(), ())
+        self.assertNotIn('reply', bridge._requests)
+        bridge.feed.observe(dict(bridgeRequestId='original', threadId='native-thread', provider='chatgpt', busy=True))
+        bridge._readiness = lambda: {'busy': True}
+        self.assertTrue(bridge._enqueue(reply, 'hash'))
+        self.assertFalse(bridge._enqueue(reply, 'hash'))
+        self.error('request_id_conflict', lambda: bridge._enqueue(reply, 'changed'))
+        commands = bridge.drain_commands()
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0].reply_target, ('chatgpt', 'native-thread'))
+        # A native publication must not consume a queued continuation.
+        bridge.feed.observe(dict(threadId='native-thread', provider='chatgpt', busy=True))
+        queued = bridge.feed.read('reply', 0)['snapshot']
+        self.assertEqual(queued['phase'], 'queued')
+        self.assertEqual(queued['replyToRequestId'], 'original')
+        for value in [None, '', ' ', 7, 'x' * 129]:
+            with self.subTest(value=value), self.assertRaises(BridgeError):
+                _submission({**payload, 'replyToRequestId': value}, 'bad')
+
     def bind(self, bridge, user='alice', project='one', revision=None):
         return bridge.project_request(dict(action='bind', renderUserId=user,
             renderProjectId=project, expectedRevision=revision))['binding']

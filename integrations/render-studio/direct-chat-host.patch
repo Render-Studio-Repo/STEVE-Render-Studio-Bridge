@@ -1,0 +1,287 @@
+--- a/frontend/components/render-agent.js
++++ b/frontend/components/render-agent.js
+@@ -1891,8 +1891,21 @@
+ 
+   function steveChatOwner() { return { userId: currentUserId(), projectId: String(getProjectId?.() || "") }; }
+ 
++  function steveChatRoute() {
++    const owner = steveChatOwner();
++    const records = steveDesignChat.records(owner).filter(item => !item.rejected
++      && item.userId === owner.userId && item.projectId === owner.projectId
++      && item.requestId);
++    const record = [...records].reverse().find(item => item.snapshot?.threadId
++      || records.some(target => target !== item && target.requestId === item.replyToRequestId));
++    if (record) return { userId: record.userId, projectId: record.projectId,
++      replyToRequestId: record.snapshot?.threadId ? record.requestId : record.replyToRequestId };
++    if (records.length) return { ...owner, replyPending: true };
++    return String(getCadEngine?.() || "").trim().toLowerCase() === "steve" ? owner : null;
++  }
++
+   function isSteveDesignChat() {
+-    return String(getCadEngine?.() || "").trim().toLowerCase() === "steve";
++    return Boolean(steveChatRoute());
+   }
+ 
+   function designChatStorageKey() {
+@@ -2814,9 +2827,10 @@
+     }
+     const projectId = String(getProjectId?.() || "");
+     const draftStorageKey = designChatDraftStorageKey();
++    const steveRoute = options.queuedTurn ? options.steveRoute : steveChatRoute();
+     persistDesignChatDraft(raw, draftStorageKey);
+     if (designChatIsBusy() && !options.queuedTurn) {
+-      return queueDesignChatTurn(host, raw, options, inputEl);
++      return queueDesignChatTurn(host, raw, { ...options, steveRoute }, inputEl);
+     }
+     const context = promptDesignContext();
+     if (options.compactReferenceHandoff) {
+@@ -2838,20 +2852,21 @@
+     }
+     rememberDesignChatReferences(outgoingAttachments);
+     if (!options.queuedTurn) designChatAttachments = [];
+-    if (isSteveDesignChat()) {
++    if (steveRoute) {
+       ++designChatLoadEpoch;
+       designChatBusyProjectId = projectId;
+       if (inputEl) inputEl.value = "";
+       setDesignChatStatus(host, "Sending directly to STEVE in Fusion…");
+       renderDesignChat(host, { scrollToLatest: true });
+       try {
++        if (steveRoute.replyPending) throw new Error("This STEVE request is not linked to a native conversation yet. Wait for its reply before sending again.");
+         if (typeof onSendSteveDesignMessage !== "function") throw new Error("STEVE chat is not connected to this Studio window.");
+         const packet = designGenerationPacket({
+           prompt: raw,
+           targetMode: "new",
+           selectedFilename: context.models?.selectedFilename || "",
+         });
+-        const result = await onSendSteveDesignMessage(packet);
++        const result = await onSendSteveDesignMessage({ ...packet, ...steveRoute });
+         if (result?.ok === false) throw new Error(result.error || "STEVE did not accept the message.");
+         finishSubmittedDesignChatDraft(host, raw, true, draftStorageKey, projectId);
+         setDesignChatStatus(host, "Sent to STEVE. Fusion replies and progress will mirror in this conversation.");
+@@ -3059,7 +3074,7 @@
+     mountSteveReplyRecovery({
+       host,
+       getOwner: steveChatOwner,
+-      isSteveSelected: () => String(getCadEngine?.() || "").toLowerCase() === "steve",
++      isSteveSelected: isSteveDesignChat,
+     });
+     window.addEventListener("render3d:steve-chat-updated", event => {
+       const owner = steveChatOwner();
+--- a/frontend/components/render-agent-design-chat.test.js
++++ b/frontend/components/render-agent-design-chat.test.js
+@@ -397,7 +397,7 @@
+ });
+ 
+ test("Design Chat mirrors structured harness activity, status, artifact, and table blocks", () => {
+-  const steveChat = { messages: () => [
++  const steveChat = { records: () => [], messages: () => [
+     { role: "assistant", steve: true, runKind: "activity", runTitle: "Working in Fusion", steps: [{ title: "Read metric thread definitions", status: "completed", code: "print('ok')" }] },
+     { role: "assistant", steve: true, runKind: "status", content: "Thinking" },
+     { role: "assistant", steve: true, runKind: "artifact", artifactLabel: "Mount v1", artifactMeta: "Pinned" },
+@@ -920,7 +920,7 @@
+   assert.equal(rows(h.feed).length, 0);
+ });
+ 
+-test("Design Chat shows STEVE as a parallel participant while another CAD harness is selected", () => {
++test("STEVE record owns Design Chat while another CAD harness is selected", () => {
+   const values = new Map();
+   const storage = { get length() { return values.size; }, key: i => [...values.keys()][i],
+     getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
+@@ -933,9 +933,10 @@
+   });
+   h.chat.renderDesignChat(h.host);
+   const rendered = rows(h.feed);
+-  assert.equal(rendered.length, 4);
+-  assert.ok(rendered.some(row => row.children[0].textContent.includes("Render Design Partner")
+-    && row.children[1].innerHTML.includes("Render partner is reviewing the design")));
++  assert.equal(rendered.length, 3);
++  assert.equal(h["send-as-is"].hidden, true);
++  assert.equal(h.submit.textContent, "Send to STEVE");
++  assert.doesNotMatch(h.feed.textContent, /Render partner is reviewing/);
+   assert.ok(rendered.some(row => row.children[0].textContent.includes("STEVE")
+     && row.children[1].innerHTML.includes("Working on the wheel axles")));
+ });
+@@ -984,3 +985,171 @@
+   assert.match(h.status.textContent, /Sent to STEVE/);
+   assert.doesNotMatch(h.feed.textContent, /Thinking through your design|Reply failed/);
+ });
++
++
++test("STEVE origin survives engine changes and is sent as replyToRequestId", async () => {
++  const steveChat = new SteveDesignChat({ storage: { length: 0 } });
++  const original = steveChat.remember({ userId: "user", projectId: "project-a" }, "request-origin", "Original request");
++  original.snapshot = { threadId: "native-thread-original", phase: "running", messages: [] };
++  steveChat.write(original);
++  const packets = [];
++  const apiCalls = [];
++  const h = harness([], async url => { apiCalls.push(url); return {}; }, {
++    steveChat, cadEngine: "render",
++    onSendSteveDesignMessage: async packet => { packets.push(packet); return { ok: true }; },
++  });
++  h.chat.renderDesignChat(h.host);
++  assert.equal(h["send-as-is"].hidden, true);
++  h.setCadEngine("jake");
++  await h.chat.sendDesignChat(h.host, "Continue the original conversation");
++  assert.deepEqual(JSON.parse(JSON.stringify(packets.map(({userId, projectId, replyToRequestId, prompt}) =>
++    ({userId, projectId, replyToRequestId, prompt})))), [{ userId: "user", projectId: "project-a",
++    replyToRequestId: "request-origin", prompt: "Continue the original conversation" }]);
++  assert.deepEqual(apiCalls, []);
++  h.setProject("project-b");
++  h.chat.renderDesignChat(h.host);
++  assert.equal(h["send-as-is"].hidden, false);
++  assert.equal(h.submit.textContent, "Keep refining");
++  h.setProject("project-a");
++  h.setUser("someone-else");
++  h.chat.renderDesignChat(h.host);
++  assert.equal(h["send-as-is"].hidden, false);
++});
++
++test("rejected STEVE request cannot replace the last owned conversation", async () => {
++  const steveChat = new SteveDesignChat({ storage: { length: 0 } });
++  const original = steveChat.remember({ userId: "user", projectId: "project-a" }, "request-original", "Original request");
++  original.snapshot = { threadId: "native-thread-original", phase: "running", messages: [] };
++  steveChat.write(original);
++  const rejected = steveChat.remember({ userId: "user", projectId: "project-a" }, "request-rejected", "Rejected request");
++  rejected.rejected = true;
++  steveChat.write(rejected);
++  let packet;
++  const h = harness([], async () => ({}), { steveChat, cadEngine: "render",
++    onSendSteveDesignMessage: async value => { packet = value; return { ok: true }; } });
++  await h.chat.sendDesignChat(h.host, "Reply to the accepted request");
++  assert.equal(packet?.replyToRequestId, "request-original");
++});
++
++
++test("queued STEVE replies retain the request selected when submitted", async () => {
++  const steveChat = new SteveDesignChat({ storage: { length: 0 } });
++  const original = steveChat.remember({ userId: "user", projectId: "project-a" }, "request-original", "Original request");
++  original.snapshot = { threadId: "native-thread-original", phase: "running", messages: [] };
++  steveChat.write(original);
++  const packets = [];
++  let finishFirst;
++  const h = harness([], async () => ({}), { steveChat, cadEngine: "render",
++    onSendSteveDesignMessage: packet => {
++      packets.push(packet);
++      return packets.length === 1 ? new Promise(resolve => { finishFirst = resolve; }) : Promise.resolve({ ok: true });
++    } });
++  const first = h.chat.sendDesignChat(h.host, "First reply");
++  const second = h.chat.sendDesignChat(h.host, "Queued reply");
++  steveChat.remember({ userId: "user", projectId: "project-a" }, "request-newest", "Different request");
++  h.setCadEngine("jake");
++  finishFirst({ ok: true });
++  await first;
++  await second;
++  assert.deepEqual(packets.map(packet => packet.replyToRequestId), ["request-original", "request-original"]);
++  assert.equal(packets[1].prompt, "Queued reply");
++});
++
++test("STEVE transport failure preserves the owned draft and direct retry mode", async () => {
++  const steveChat = new SteveDesignChat({ storage: { length: 0 } });
++  const original = steveChat.remember({ userId: "user", projectId: "project-a" }, "request-original", "Original request");
++  original.snapshot = { threadId: "native-thread-original", phase: "running", messages: [] };
++  steveChat.write(original);
++  const h = harness([], async () => ({}), { steveChat, cadEngine: "render",
++    onSendSteveDesignMessage: async () => { throw new Error("Fusion is busy"); } });
++  const result = await h.chat.sendDesignChat(h.host, "Keep this reply");
++  assert.equal(result.ok, false);
++  assert.equal(h.input.value, "Keep this reply");
++  assert.equal(h.storage.get("render3d:promptDesignDraft:v1:user:project-a"), "Keep this reply");
++  assert.equal(h["send-as-is"].hidden, true);
++  assert.equal(h.submit.textContent, "Send to STEVE");
++  assert.match(h.status.textContent, /Fusion is busy/);
++});
++
++
++test("a queued STEVE record without a thread replies to the previous linked request", async () => {
++  const steveChat = new SteveDesignChat({ storage: { length: 0 } });
++  const owner = { userId: "user", projectId: "project-a" };
++  const linked = steveChat.remember(owner, "request-linked", "Original request");
++  linked.snapshot = { phase: "running", threadId: "native-thread-original", messages: [] };
++  steveChat.write(linked);
++  const queued = steveChat.remember(owner, "request-queued", "Queued continuation");
++  queued.snapshot = { phase: "queued", messages: [] };
++  steveChat.write(queued);
++  const rejected = steveChat.remember(owner, "request-rejected", "Rejected request");
++  rejected.snapshot = { threadId: "native-thread-rejected", messages: [] };
++  rejected.rejected = true;
++  steveChat.write(rejected);
++  const packets = [];
++  const h = harness([], async () => ({}), { steveChat, cadEngine: "render",
++    onSendSteveDesignMessage: async packet => { packets.push(packet); return { ok: true }; } });
++  await h.chat.sendDesignChat(h.host, "Another reply while queued");
++  assert.equal(packets[0].replyToRequestId, "request-linked");
++  assert.equal(packets[0].userId, "user");
++  assert.equal(packets[0].projectId, "project-a");
++  queued.snapshot.threadId = "native-thread-original";
++  steveChat.write(queued);
++  await h.chat.sendDesignChat(h.host, "Reply after the queued request links");
++  assert.equal(packets[1].replyToRequestId, "request-queued");
++  assert.equal(h["send-as-is"].hidden, true);
++});
++
++
++test("a real STEVE submit transport failure never becomes an unknown reply target", async () => {
++  const values = new Map();
++  const storage = { get length() { return values.size; }, key: i => [...values.keys()][i],
++    getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
++  const steveChat = new SteveDesignChat({ storage });
++  const attempts = [];
++  const integration = {
++    prepareSubmission: async () => 1,
++    submitCurrent: async packet => { attempts.push(packet); throw new TypeError("Failed to fetch"); },
++    connector: { watch: async () => null },
++  };
++  const h = harness([], async () => ({}), { steveChat, cadEngine: "steve",
++    onSendSteveDesignMessage: packet => steveChat.submit(integration, {
++      owner: { userId: packet.userId, projectId: packet.projectId }, prompt: packet.prompt,
++      replyToRequestId: packet.replyToRequestId, requestId: `request-attempt-${attempts.length + 1}`,
++    }) });
++  const first = await h.chat.sendDesignChat(h.host, "Original request");
++  assert.equal(first.ok, false);
++  assert.equal(steveChat.records({ userId: "user", projectId: "project-a" })[0].rejected, false);
++  h.setCadEngine("render");
++  const retry = await h.chat.sendDesignChat(h.host, "Original request");
++  assert.equal(retry.ok, false);
++  assert.match(retry.error, /not linked/);
++  assert.equal(attempts.length, 1);
++  assert.equal(attempts[0].requestId, "request-attempt-1");
++  assert.equal(h.input.value, "Original request");
++  assert.equal(h["send-as-is"].hidden, true);
++  steveChat.dispose();
++});
++
++test("a real failed STEVE continuation preserves the original reply target", async () => {
++  const values = new Map();
++  const storage = { get length() { return values.size; }, key: i => [...values.keys()][i],
++    getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
++  const steveChat = new SteveDesignChat({ storage });
++  const owner = { userId: "user", projectId: "project-a" };
++  steveChat.remember(owner, "request-prior", "Original request");
++  await assert.rejects(steveChat.submit({
++    prepareSubmission: async () => 1,
++    submitCurrent: async () => { throw new TypeError("Failed to fetch"); },
++    connector: { watch: async () => null },
++  }, { owner, prompt: "Unsent follow-up", requestId: "request-unsent", replyToRequestId: "request-prior" }), /Failed to fetch/);
++  const failed = steveChat.records(owner).find(record => record.requestId === "request-unsent");
++  assert.equal(failed.rejected, false);
++  assert.equal(failed.replyToRequestId, "request-prior");
++  const packets = [];
++  const h = harness([], async () => ({}), { steveChat, cadEngine: "render",
++    onSendSteveDesignMessage: async packet => { packets.push(packet); return { ok: true }; } });
++  await h.chat.sendDesignChat(h.host, "Retry this follow-up");
++  assert.equal(packets[0]?.replyToRequestId, "request-prior");
++  assert.equal(packets[0]?.projectId, "project-a");
++  steveChat.dispose();
++});
+--- a/frontend/studio/app.js
++++ b/frontend/studio/app.js
+@@ -57473,7 +57473,7 @@
+       });
+       const integration = await getSteveIntegration();
+       await integration.setActive(true);
+-      const result = await integration.submitCurrent({ owner, prompt });
++      const result = await integration.submitCurrent({ owner, prompt, replyToRequestId: packet.replyToRequestId });
+       return { ok: true, steve: true, requestId: result?.requestId || "" };
+     },
+     onGenerateDesignPrompt: async (packet = {}) => {

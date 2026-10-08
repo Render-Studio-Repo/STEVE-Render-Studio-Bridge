@@ -1,8 +1,8 @@
 import { steveProjectBinding, bindingOwns } from './steve-project-binding.js?v=20261008-completion-placement1';
-import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-completion-placement1';
+import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-targeted-reply1';
 import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-completion-placement1";
 import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-completion-placement1";
-import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-completion-placement1";
+import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-targeted-reply1";
 import { isSteveChatComplete } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 
 const PREFIX = "render3d:steveDesignChat:v1:";
@@ -196,16 +196,20 @@ export class SteveDesignChat {
     return Promise.all(this.records(owner).filter(record => !isSteveChatComplete(record.snapshot) && !record.rejected)
       .map(record => this.watch(record)));
   }
-  async submit(integration, { owner, prompt, requestId = globalThis.crypto.randomUUID() }) {
+  async submit(integration, { owner, prompt, replyToRequestId, requestId = globalThis.crypto.randomUUID() }) {
     owner = { ...owner };
-    const bindingRevision = await integration.prepareSubmission(owner);
+    if (replyToRequestId && !this.records(owner).some(item => item.requestId === replyToRequestId && !item.rejected)) {
+      throw new Error("This STEVE reply does not belong to the current project conversation.");
+    }
+    const bindingRevision = await integration.prepareSubmission(owner, replyToRequestId);
     const record = this.remember(owner, requestId, prompt);
     record.resultOpen = { intent: "auto", state: "pending", message: "" };
     record.bindingRevision = bindingRevision;
+    if (replyToRequestId) record.replyToRequestId = replyToRequestId;
     this.write(record);
     if (record.persistenceWarning) throw new Error("Cannot save the STEVE request ID. Free browser storage before sending.");
     try {
-      const result = await integration.submitCurrent({ prompt, requestId, bindingRevision, owner: { userId: record.userId, projectId: record.projectId } });
+      const result = await integration.submitCurrent({ prompt, requestId, bindingRevision, ...(replyToRequestId ? { replyToRequestId } : {}), owner: { userId: record.userId, projectId: record.projectId } });
       void this.watch(record, integration.connector);
       return result;
     } catch (error) {

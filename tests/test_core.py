@@ -198,6 +198,36 @@ class FakeClient:
 
 
 class ControllerTests(unittest.TestCase):
+    def test_bridge_reply_requires_matching_active_provider_and_thread(self):
+        from unittest.mock import Mock
+        controller = self.controller
+        controller.thread_id = 'linked'
+        controller.state['threadId'] = 'linked'
+        capture = Mock()
+        for target in [('chatgpt', 'unrelated'), ('claude', 'linked')]:
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, 'conversation_mismatch'):
+                controller.dispatch('send', {'text': 'Reply', 'bridgeReplyTarget': target}, capture_context=capture)
+        capture.assert_not_called()
+        self.assertFalse(controller._send_queued)
+        self.assertFalse(any(method == 'turn/start' for method, _ in self.client.calls))
+        # Matching continuation uses the original native thread, without thread/start.
+        self.assertTrue(controller.dispatch('send', {'text': 'Reply', 'bridgeReplyTarget': ('chatgpt', 'linked')}))
+        eventually(lambda: any(method == 'turn/start' for method, _ in self.client.calls))
+        sent = next(params for method, params in self.client.calls if method == 'turn/start')
+        self.assertEqual(sent['threadId'], 'linked')
+        self.assertFalse(any(method == 'thread/start' for method, _ in self.client.calls))
+
+    def test_bridge_reply_worker_rechecks_target_before_send(self):
+        from unittest.mock import Mock
+        controller = self.controller
+        controller.thread_id = 'unrelated'
+        controller._send = Mock()
+        with self.assertRaisesRegex(ValueError, 'conversation_mismatch'):
+            controller._handle('send', {'text': 'Reply', 'bridgeRequestId': 'reply',
+                                        'bridgeReplyTarget': ('chatgpt', 'linked')})
+        controller._send.assert_not_called()
+        self.assertEqual(controller.state['bridgeRequestId'], 'reply')
+
     def setUp(self):
         self.snapshots = []
         self.urls = []

@@ -75,17 +75,14 @@ authentication backoff, and live preview polling with no Design Chat host.
 ## Keep STEVE locked to its project
 
 The native bridge owns one project binding for the paired Render origin. A visible
-project change never changes that binding. Render displays the locked project name
-and ID, with an explicit action to open it.
+project change never changes that binding. The first explicit Send associates an
+unbound bridge with its originating project. The notification opens that project
+without a manual project-lock menu.
 
 After work, preview exports, and saves finish, STEVE becomes available for another
 project. An explicit new Send in a different project of the same account claims
 it with the last binding revision. Browsing never claims it. The previous
 association remains in place until that handoff, so final results stay readable.
-
-Hosts that expose manual project selection can also use **Change project**,
-review the old and new IDs, and confirm. STEVE refuses a change while work is active or queued. A confirmation from
-a stale browser tab cannot replace a newer selection. Cancel leaves the lock intact.
 
 Before recording or submitting a new request, read the authenticated binding and
 check it against the captured composer owner. Include `bindingRevision` with the
@@ -453,3 +450,10 @@ The Render host wiring is in `placement-host.patch`. It reuses
 objects keep their transforms. After a saved import finishes, call the returned
 preview controller's `refreshPlacement()` to reconcile the matching catalog object
 without waiting for another geometry revision.
+
+
+## Direct STEVE replies
+
+Use `direct-chat-host.patch` for the Render Agent chat host. A saved STEVE request selects its mirrored conversation even when another generation engine is selected. The chat sends directly and hides the Send-as-is controls.
+
+Forward `packet.replyToRequestId` through the host callback to `integration.submitCurrent({ owner, prompt, replyToRequestId })`. For notification replies, use the notification record's original user, project, and request ID. A targeted reply never claims a different project. New first submissions associate the unbound bridge automatically. Keep every import of `steve-design-chat.js` on the same version URL so its live state is shared.

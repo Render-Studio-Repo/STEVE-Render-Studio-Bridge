@@ -29,6 +29,10 @@ one Render account and project for that paired bridge. `capabilities.projectBind
 advertises this contract. Switching browser tabs, changing the visible Render project,
 or rotating the pairing key does not change the binding.
 
+The first explicit Send associates an unbound bridge with that Render project using a null expected revision. Navigation does not associate or move it. Render does not need a project-lock dropdown.
+
+Targeted replies include `replyToRequestId` in the signed submission and require the native `replyToRequest` capability. The bridge resolves the earlier request's provider and native conversation under the original project ownership. Replies may queue while STEVE is busy. Dispatch rejects a different active conversation rather than sending there. Each reply retains its own idempotency request ID.
+
 Signed `POST /v1/project` with `{"action":"get"}` returns
 `{version:1,binding:null}` or a binding containing `renderUserId`, `renderProjectId`,
 and `revision`. Render displays the bound project name and ID even when the user

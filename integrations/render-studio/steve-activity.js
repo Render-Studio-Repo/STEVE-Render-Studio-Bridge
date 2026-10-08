@@ -1,5 +1,5 @@
 import { steveProjectBinding, validateSteveBinding, bindingOwns } from './steve-project-binding.js?v=20261008-completion-placement1';
-import { signSteveSubmission } from './steve-connector.js?v=20261008-completion-placement1';
+import { signSteveSubmission } from './steve-connector.js?v=20261008-targeted-reply1';
 
 export async function readSteveActivity(connector, { renderUserId, after }, signal) {
   if (!renderUserId || !Number.isSafeInteger(after) || after < 0) throw new Error('Invalid STEVE activity scope.');

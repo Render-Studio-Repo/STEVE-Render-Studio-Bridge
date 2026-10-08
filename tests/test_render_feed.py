@@ -8,6 +8,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'addin/STEVE'))
 from steve.render_feed import RenderFeed
 
 class RenderFeedTests(unittest.TestCase):
+    def test_failed_undispatched_reply_cannot_inherit_native_answer(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'history.json'
+            feed = RenderFeed(path)
+            feed.accept('original', 'Original prompt', 'one', 'alice')
+            feed.observe({'bridgeRequestId': 'original', 'threadId': 'linked', 'provider': 'chatgpt',
+                          'bridgeMessages': [{'role': 'user', 'text': 'wrapper'},
+                                             {'id': 'answer', 'role': 'assistant', 'text': 'Old answer'}]})
+            feed.accept('reply', 'Follow up', 'one', 'alice', reply_to_request_id='original',
+                        reply_target=('chatgpt', 'linked'))
+            feed.fail('reply', 'target_document_mismatch')
+            failed = feed.read('reply', 0)['snapshot']
+            publication = {'threadId': 'linked', 'provider': 'chatgpt', 'status': 'Ready',
+                           'messages': [{'role': 'user', 'text': 'wrapper'},
+                                        {'id': 'answer', 'role': 'assistant', 'text': 'Old answer'}]}
+            for current in (feed, RenderFeed(path)):
+                current.observe(publication)
+                self.assertEqual(current.read('reply', 0)['snapshot'], failed)
+            # Only a publication carrying this request's actual send messages
+            # unlocks native continuation mirroring for the targeted reply.
+            feed.accept('sent', 'Delivered reply', 'one', 'alice', reply_to_request_id='original',
+                        reply_target=('chatgpt', 'linked'))
+            feed.observe({'bridgeRequestId': 'sent', 'threadId': 'linked', 'provider': 'chatgpt',
+                          'busy': True, 'bridgeMessages': [{'role': 'user', 'text': 'reply wrapper'}]})
+            self.assertTrue(feed.read('sent', 0)['snapshot']['replyDispatched'])
+            feed.observe(publication)
+            self.assertEqual(feed.read('sent', 0)['snapshot']['phase'], 'completed')
+
     def test_cross_owner_count_eviction_changes_epoch(self):
         feed = RenderFeed()
         feed.accept('alice-old', 'old', 'one', 'alice')

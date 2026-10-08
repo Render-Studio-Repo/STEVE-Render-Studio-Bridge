@@ -501,10 +501,14 @@ export class SteveConnector {
         'X-Steve-Timestamp': timestamp, 'X-Steve-Nonce': nonce, 'X-Steve-Signature': signature } });
   }
 
-  async prepareSubmission(owner, bindingRevision) {
+  async prepareSubmission(owner, bindingRevision, replyToRequestId) {
     await steveProjectBinding.refresh(this);
     const binding = steveProjectBinding.binding;
-    if (bindingRevision === undefined && binding && steveProjectBinding.availableForProjectChange
+    if (!replyToRequestId && bindingRevision === undefined && !binding) {
+      steveProjectBinding.prepare(owner);
+      await steveProjectBinding.confirm(this);
+    }
+    if (!replyToRequestId && bindingRevision === undefined && binding && steveProjectBinding.availableForProjectChange
       && binding.renderUserId === String(owner?.userId || '')
       && binding.renderProjectId !== String(owner?.projectId || '')) {
       steveProjectBinding.prepare(owner, { requireAvailable: true });
@@ -513,16 +517,20 @@ export class SteveConnector {
     return steveProjectBinding.assertOwner(owner, bindingRevision);
   }
 
-  async submit({ prompt, projectId, folderId, renderProjectId, renderUserId, bindingRevision, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
+  async submit({ prompt, projectId, folderId, renderProjectId, renderUserId, bindingRevision, replyToRequestId, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
     const cleanPrompt = String(prompt || "").trim();
     if (!cleanPrompt) throw new Error("Enter a CAD prompt before sending to STEVE.");
     await this.refreshSecret();
     if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
-    if (this.state !== "ready") throw new Error(STEVE_STATE_VIEW[this.state].recovery);
+    if (this.state !== "ready" && !(this.state === "busy" && replyToRequestId)) throw new Error(STEVE_STATE_VIEW[this.state].recovery);
     if (!renderProjectId || !renderUserId) throw new Error("Both Render project and user IDs are required.");
-    const revision = await this.prepareSubmission({ userId: renderUserId, projectId: renderProjectId }, bindingRevision);
+    const revision = await this.prepareSubmission({ userId: renderUserId, projectId: renderProjectId }, bindingRevision, replyToRequestId);
     const payload = { prompt: cleanPrompt, renderProjectId: String(renderProjectId), renderUserId: String(renderUserId),
       bindingRevision: revision };
+    if (replyToRequestId) {
+      if (this.status?.capabilities?.replyToRequest !== true) throw new Error("Update STEVE in Fusion to resume this conversation safely.");
+      payload.replyToRequestId = String(replyToRequestId);
+    }
     if (projectId) payload.projectId = String(projectId);
     if (folderId) payload.folderId = String(folderId);
     const cleanName = normalizeDesignName(designName);
@@ -769,8 +777,8 @@ export function mountSteveConnector({
       connector.deactivate();
       return connector.snapshot();
     },
-    prepareSubmission: owner => connector.prepareSubmission(owner),
-    async submitCurrent({ prompt = getPrompt(), requestId, owner, bindingRevision } = {}) {
+    prepareSubmission: (owner, replyToRequestId) => connector.prepareSubmission(owner, undefined, replyToRequestId),
+    async submitCurrent({ prompt = getPrompt(), requestId, owner, bindingRevision, replyToRequestId } = {}) {
       steveProjectBinding.assertOwner(owner, bindingRevision);
       const result = await connector.submit({
         prompt,
@@ -778,6 +786,7 @@ export function mountSteveConnector({
         renderProjectId: owner?.projectId,
         renderUserId: owner?.userId,
         bindingRevision,
+        replyToRequestId,
         designName: designName?.value || suggestedDesignName(prompt),
       });
       setPromptStatus("ok", result.message || "Prompt sent to STEVE in Fusion.");

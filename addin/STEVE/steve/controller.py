@@ -496,6 +496,7 @@ class Controller:
             if action == "send":
                 if self._send_queued or self.state["busy"] or self.state["jobBusy"]:
                     return False
+                self._check_bridge_reply_target(payload)
                 if capture_context:
                     payload = {**(payload or {}), "fusionContext": capture_context(action)}
                 self._send_queued = True
@@ -831,6 +832,9 @@ class Controller:
             with self._lock:
                 self.state['bridgeRequestId'] = payload.get('bridgeRequestId')
                 self.state['bridgeMessageStart'] = len(self.state['messages'])
+                # Recheck on the worker: an earlier queued history/provider action
+                # may have changed the active conversation after admission.
+                self._check_bridge_reply_target(payload)
             self._send(str(payload.get("text", "")).strip(), payload.get("fusionContext"), payload.get("images"))
         elif action == "job":
             self._job_action(payload)
@@ -1450,6 +1454,11 @@ class Controller:
                 finally:
                     self.login_id = None
             raise
+
+    def _check_bridge_reply_target(self, payload):
+        target = payload.get('bridgeReplyTarget')
+        if target is not None and tuple(target) != (self.state['provider'], self.thread_id):
+            raise ValueError('conversation_mismatch: Open the linked STEVE conversation with its original provider before replying.')
 
     def _send(self, text, context=None, images=None):
         context = manufacturing_context(context, self.dfm.enabled, self.state['rmfgState'])

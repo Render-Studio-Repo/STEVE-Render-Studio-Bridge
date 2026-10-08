@@ -21,6 +21,26 @@ ORIGIN = "http://render-studio.test"
 
 
 class BridgeHTTPTests(unittest.TestCase):
+    def test_signed_reply_contract_and_busy_queue(self):
+        secret = self.pair()
+        self.assertTrue(self.request('/v1/status')[2]['capabilities']['replyToRequest'])
+        body = {'prompt': 'Follow up', 'replyToRequestId': 'original'}
+        status, _, packet = self.submit(secret, body)
+        self.assertEqual((status, packet['error']['code']), (404, 'request_not_found'))
+        self.bridge.feed.accept('original', 'Other project', 'other', 'alice')
+        status, _, packet = self.submit(secret, body)
+        self.assertEqual((status, packet['error']['code']), (409, 'project_mismatch'))
+        self.bridge.feed.accept('original', 'Owned', 'render-a', 'alice')
+        self.bridge.feed.observe({'bridgeRequestId': 'original', 'threadId': 'linked',
+                                  'provider': 'chatgpt', 'busy': True})
+        self.bridge._readiness = lambda: {'providerReady': True, 'busy': True}
+        self.assertEqual(self.submit(secret, body)[0], 202)
+        self.assertEqual(self.submit(secret, body)[0], 200)
+        self.assertEqual(self.submit(secret, {**body, 'replyToRequestId': 'different'})[0], 409)
+        commands = self.bridge.drain_commands()
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0].reply_target, ('chatgpt', 'linked'))
+
     def test_activity_contract_auth_validation_cors_and_no_model_work(self):
         payload = {'renderUserId': 'alice', 'after': 0}
         self.assertEqual(self.request('/v1/activity', 'POST', payload)[0], 401)
@@ -165,7 +185,7 @@ class BridgeHTTPTests(unittest.TestCase):
             "busy": False,
             "ready": False,
             "pairingId": None,
-            "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "projectBinding": True, "livePreview": False, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
+            "capabilities": {"authPing": True, "submitPrompt": True, "replyToRequest": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "projectBinding": True, "livePreview": False, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
             "queueDepth": 0,
         })
         self.assertNotIn("secret", json.dumps(result).lower())
@@ -481,6 +501,43 @@ class MainThreadAdapterTests(unittest.TestCase):
         entry._dispatch_bridge_commands(bridge, controller, Obj(message_context=Mock()))
         controller.dispatch.assert_not_called()
         bridge.requeue_commands.assert_called_once_with(commands)
+
+    def test_targeted_reply_waits_until_idle_and_passes_pinned_target(self):
+        from tests.test_clipboard_bridge import load_entry
+        from steve.external_bridge import BridgeCommand
+        entry = load_entry()
+        reply = Submission('reply', 'Follow up', None, None, None, 'one', 'alice', 'revision', 'original')
+        command = BridgeCommand(1, 'submit', reply, ('chatgpt', 'linked'))
+        bridge = Obj(drain_commands=Mock(return_value=(command,)), requeue_commands=Mock(), feed=Obj(fail=Mock()))
+        controller = Obj(state={'busy': True}, dispatch=Mock(return_value=True))
+        fusion = Obj(message_context=Mock())
+        entry._dispatch_bridge_commands(bridge, controller, fusion)
+        controller.dispatch.assert_not_called()
+        bridge.requeue_commands.assert_called_with((command,))
+        controller.state['busy'] = False
+        entry._dispatch_bridge_commands(bridge, controller, fusion)
+        self.assertEqual(controller.dispatch.call_args.args[1]['bridgeReplyTarget'], ('chatgpt', 'linked'))
+        capture = controller.dispatch.call_args.kwargs['capture_context']
+        bridge.feed.read = Mock(return_value={'snapshot': {'targetDocument': {'id': 'document'}}})
+        bridge.storage = Obj(track=Mock())
+        document = Obj(isValid=True)
+        fusion.document_id = 'document'
+        fusion.document = document
+        fusion.app = Obj(activeDocument=object())
+        with self.assertRaisesRegex(ValueError, 'target_document_mismatch'):
+            capture('send')
+        fusion.message_context.assert_not_called()
+        bridge.storage.track.assert_not_called()
+        fusion.app.activeDocument = document
+        fusion.message_context.return_value = {'document_id': 'document', 'targetPinned': True}
+        self.assertEqual(capture('send')['document_id'], 'document')
+        fusion.message_context.assert_called_once_with('steer')
+        bridge.storage.track.assert_called_once_with(reply, document)
+        bridge.storage = None
+        controller.dispatch.side_effect = ValueError('conversation_mismatch')
+        with self.assertRaisesRegex(ValueError, 'conversation_mismatch'):
+            entry._dispatch_bridge_commands(bridge, controller, fusion)
+        self.assertEqual(bridge.feed.fail.call_args.args[0], 'reply')
 
 
 

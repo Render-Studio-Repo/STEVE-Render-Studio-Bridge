@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { SteveProjectBinding, steveProjectBinding, bindingError } from './steve-project-binding.js?v=20261008-completion-placement1';
 import { SteveActivity } from './steve-activity.js';
-import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-completion-placement1';
+import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-targeted-reply1';
 import { SteveDesignChat } from './steve-design-chat.js';
 import { SteveLivePreview } from './steve-live-preview.js';
 
@@ -156,8 +156,8 @@ test('late get cannot restore an obsolete native binding', async () => {
   assert.equal(state.binding.renderProjectId, 'project-b');
 });
 
-test('lock UI navigation never writes; cancel and idle confirmation use the captured CAS', async () => {
-  const { mountSteveActivity } = await import('./steve-activity-ui.js?v=20261008-completion-placement1');
+test('activity navigation preserves ownership without a project-lock menu', async () => {
+  const { mountSteveActivity } = await import('./steve-activity-ui.js?v=20261008-targeted-reply1');
   class Node {
     constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.attrs = {}; this.handlers = new Map();
       this.hidden = false; this.disabled = false; this.value = ''; this.textContent = ''; this.scrollHeight = 0; this.scrollTop = 0; this.clientHeight = 0; }
@@ -189,16 +189,13 @@ test('lock UI navigation never writes; cancel and idle confirmation use the capt
     await new Promise(resolve => setImmediate(resolve));
     viewport.projectId = 'project-b'; window.dispatchEvent(new Event('render3d:project-changed'));
     assert.equal(writes.length, 0);
-    assert.match(walk(host).find(node => node.dataset?.steveLockBadge).textContent, /Mount #project-a/);
-    await button('Open locked project').click(); assert.equal(viewport.projectId, 'project-a'); assert.equal(writes.length, 0);
-    const select = walk(host).find(node => node.tag === 'select'); select.value = 'project-b';
-    await button('Change project').click();
-    assert.ok(walk(host).some(node => /from Mount #project-a to Test #project-b/.test(node.textContent)));
-    await button('Cancel').click(); assert.equal(state.pending, null); assert.equal(writes.length, 0);
-    await button('Change project').click(); await button('Confirm project lock').click();
-    assert.deepEqual(writes, [{ action: 'bind', renderUserId: 'alice', renderProjectId: 'project-b', expectedRevision: 'revision-a' }]);
-    assert.equal(viewport.projectId, 'project-a');
-    assert.match(walk(host).find(node => node.dataset?.steveLockBadge).textContent, /Test #project-b/);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(state.binding.renderProjectId, 'project-a');
+    assert.equal(viewport.projectId, 'project-b');
+    assert.equal(writes.length, 0);
+    assert.equal(walk(host).some(node => node.tag === 'select' || node.dataset?.steveLockBadge), false);
+    assert.equal(button('Change project'), undefined);
+    assert.equal(button('Lock STEVE to project'), undefined);
   } finally { ui?.dispose(); globalThis.window = oldWindow; globalThis.document = oldDocument; }
 });
 

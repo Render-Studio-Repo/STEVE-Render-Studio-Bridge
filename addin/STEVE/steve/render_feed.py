@@ -124,13 +124,15 @@ class RenderFeed:
         self._cursor += 1
         self._events.append({"cursor": self._cursor, "requestId": request_id, "type": kind, **deepcopy(data)})
 
-    def accept(self, request_id, prompt, render_project_id=None, render_user_id=None):
+    def accept(self, request_id, prompt, render_project_id=None, render_user_id=None, *, reply_to_request_id=None, reply_target=None):
         with self._lock:
             item = {"requestId": request_id, "phase": "queued", "status": "Queued for Fusion",
                     "error": "", "messages": [{"id": "prompt", "role": "user", "text": redact(prompt)}],
                     "activeTools": [], "targetDocument": None}
             if render_project_id and render_user_id:
                 item.update(renderProjectId=render_project_id, renderUserId=render_user_id)
+            if reply_target is not None:
+                item.update(replyToRequestId=reply_to_request_id, provider=reply_target[0], threadId=reply_target[1])
             self._requests[request_id] = item
             self._observed_signatures.pop(request_id, None)
             while len(self._requests) > MAX_REQUESTS:
@@ -156,12 +158,19 @@ class RenderFeed:
             if not item and state.get('threadId'):
                 item = next((entry for entry in reversed(self._requests.values())
                     if entry.get('renderProjectId') and entry.get('threadId') == state['threadId']
-                    and entry.get('provider') == state.get('provider')), None)
+                    and entry.get('provider') == state.get('provider') and entry.get('phase') != 'queued'
+                    and (not entry.get('replyToRequestId') or entry.get('replyDispatched') is True)), None)
                 linked = item is not None
                 if linked:
                     request_id = item['requestId']
             if not item or (linked and state.get('showingOlderMessages')) or not linked and item["phase"] in {"completed", "failed", "stopped"}:
                 return
+            # Enqueue pins identity, not proof of a delivered turn. A rejected
+            # reply must never inherit an old answer through thread fallback.
+            if (not linked and item.get('replyToRequestId') and state.get('bridgeMessages')
+                    and state.get('threadId') == item.get('threadId')
+                    and state.get('provider') == item.get('provider')):
+                item['replyDispatched'] = True
             if state.get('threadId') and not state.get('bridgeSendQueued'):
                 item.setdefault('threadId', state['threadId'])
                 item.setdefault('provider', state.get('provider'))

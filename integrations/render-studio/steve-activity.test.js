@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { SteveActivity, readSteveActivity } from './steve-activity.js';
-import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-completion-placement1';
+import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-targeted-reply1';
 import { SteveDesignChat } from './steve-design-chat.js';
 import { SteveLivePreview } from './steve-live-preview.js';
 

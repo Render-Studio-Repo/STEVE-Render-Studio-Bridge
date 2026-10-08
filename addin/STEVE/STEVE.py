@@ -145,13 +145,31 @@ def _dispatch_bridge_commands(bridge, controller, fusion_tools):
     for index, command in enumerate(commands):
         if command.kind == "submit":
             def capture(action):
-                context = fusion_tools.message_context(action)
+                if getattr(command, 'reply_target', None) is not None:
+                    try:
+                        previous = bridge.feed.read(command.submission.reply_to_request_id, 0)['snapshot']
+                    except KeyError:
+                        raise ValueError('conversation_unavailable: The reply request expired before dispatch.') from None
+                    document_id = (previous.get('targetDocument') or {}).get('id')
+                    # Check before message_context("send") can repin to a new tab.
+                    # A persisted ID alone cannot restore a Fusion document.
+                    if (not document_id or document_id != getattr(fusion_tools, 'document_id', None)
+                            or fusion_tools.document is None
+                            or getattr(fusion_tools.document, 'isValid', False) is False
+                            or fusion_tools.app.activeDocument != fusion_tools.document):
+                        raise ValueError('target_document_mismatch: Open the linked STEVE conversation and its original Fusion document before replying.')
+                    context = fusion_tools.message_context('steer')
+                    if context.get('document_id') != document_id:
+                        raise ValueError('target_document_mismatch: The original Fusion task is no longer pinned.')
+                else:
+                    context = fusion_tools.message_context(action)
                 if getattr(bridge, "storage", None):
                     bridge.storage.track(command.submission, fusion_tools.document)
                 return context
             try:
                 accepted = controller.dispatch("send", {"text": submission_message(command.submission, managed_save=bool(getattr(bridge, "storage", None) and bridge.storage.settings["autoSave"])),
-                                                       "bridgeRequestId": command.submission.request_id},
+                                                       "bridgeRequestId": command.submission.request_id,
+                                                       "bridgeReplyTarget": getattr(command, 'reply_target', None)},
                                                capture_context=capture)
             except Exception as error:
                 bridge.feed.fail(command.submission.request_id, error)
