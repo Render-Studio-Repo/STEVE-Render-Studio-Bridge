@@ -1,3 +1,4 @@
+import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-steve-open2";
 import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-chat2";
 import { isSteveChatComplete } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 
@@ -20,6 +21,7 @@ export class SteveDesignChat {
     this.running = new Map();
     this.memory = new Map();
     this.notified = new Map();
+    this.onSnapshot = () => {};
   }
   get store() { return this.storage || globalThis.localStorage; }
   records(owner) {
@@ -65,6 +67,9 @@ export class SteveDesignChat {
     }
     return record;
   }
+  savedRecord(record) {
+    try { return JSON.parse(this.store.getItem(recordKey(record, record.requestId))); } catch { return null; }
+  }
   remember(owner, requestId, prompt = "") {
     recordKey(owner, requestId);
     const previous = this.records(owner).find(record => record.requestId === requestId);
@@ -72,7 +77,7 @@ export class SteveDesignChat {
     return this.write({ userId: String(owner.userId), projectId: String(owner.projectId), requestId,
       prompt: String(prompt), createdAt: new Date().toISOString(), snapshot: null, connection: "connecting", error: "" });
   }
-  messages(owner) {
+  messages(owner, { includeResults = false } = {}) {
     return this.records(owner).flatMap(record => {
       const source = record.snapshot?.messages || [];
       const messages = source.map(message => ({
@@ -95,10 +100,13 @@ export class SteveDesignChat {
         steve: true, projectId: record.projectId, requestId: record.requestId });
       if (progress) messages.push({ role: "assistant", content: progress, steve: true,
         projectId: record.projectId, requestId: record.requestId });
+      if (includeResults && record.snapshot?.phase === "completed") messages.push({ role: "assistant", steve: true,
+        requestId: record.requestId, steveResult: true, projectId: record.projectId,
+        content: record.resultOpen?.message || "STEVE finished. Open its saved design when available." });
       return messages;
     });
   }
-  watch(record, connector = this.createConnector()) {
+  watch(record, connector = this.createConnector(), { allowAutoOpen = true } = {}) {
     const key = recordKey(record, record.requestId);
     if (this.running.has(key)) return this.running.get(key).promise;
     const controller = new AbortController();
@@ -106,7 +114,7 @@ export class SteveDesignChat {
     this.running.set(key, run);
     run.promise = Promise.resolve().then(() => connector.watch(record.requestId, {
       signal: controller.signal,
-      onUpdate: snapshot => { record.snapshot = snapshot; record.error = ""; this.write(record); },
+      onUpdate: snapshot => { record.snapshot = snapshot; record.error = ""; this.write(record); if (allowAutoOpen) this.onSnapshot(record); },
       onConnection: (connection, error) => {
         if (record.connection === connection && record.error === (error?.message || "")) return;
         record.connection = connection;
@@ -124,7 +132,7 @@ export class SteveDesignChat {
   }
   recover(owner, requestId) {
     const record = this.remember({ ...owner }, requestId);
-    return this.watch(record);
+    return this.watch(record, this.createConnector(), { allowAutoOpen: false });
   }
   resume(owner) {
     return Promise.all(this.records(owner).filter(record => !isSteveChatComplete(record.snapshot) && !record.rejected)
@@ -132,6 +140,8 @@ export class SteveDesignChat {
   }
   async submit(integration, { owner, prompt, requestId = globalThis.crypto.randomUUID() }) {
     const record = this.remember({ ...owner }, requestId, prompt);
+    record.resultOpen = { intent: "auto", state: "pending", message: "" };
+    this.write(record);
     if (record.persistenceWarning) throw new Error("Cannot save the STEVE request ID. Free browser storage before sending.");
     try {
       const result = await integration.submitCurrent({ prompt, requestId });
@@ -153,6 +163,22 @@ export class SteveDesignChat {
 export const steveDesignChat = new SteveDesignChat({
   onChange: detail => globalThis.window?.dispatchEvent(new CustomEvent("render3d:steve-chat-updated", { detail })),
 });
+
+let resultOpener = null;
+export function configureSteveResultOpening(options) {
+  resultOpener = new SteveResultOpener({ ...options,
+    persist: record => steveDesignChat.write(record),
+    readRecord: record => steveDesignChat.savedRecord(record),
+  });
+  steveDesignChat.onSnapshot = record => { void resultOpener.observe(record); };
+}
+
+export function mountSteveSavedResult(row, item, owner) {
+  if (!item.steveResult) return;
+  const record = steveDesignChat.records(owner).find(entry => entry.requestId === item.requestId);
+  if (record) mountSteveResultAction({ row, record, opener: resultOpener,
+    refresh: () => steveDesignChat.recover(owner, record.requestId) });
+}
 
 export function mountSteveDesignChat(options) {
   const integration = mountSteveConnector(options);

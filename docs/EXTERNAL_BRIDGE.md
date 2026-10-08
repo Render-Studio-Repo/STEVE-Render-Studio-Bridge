@@ -263,6 +263,14 @@ assistant response rather than claiming the file is saved when modeling first fi
 Confirmed saves include file/project/folder IDs and names. Save failure sets phase `failed`;
 show a “Retry save” control that calls `retrySave` and restarts the request watcher.
 
+For a result-opening integration, use `snapshot.save.file.id` only after phase
+`completed` and save state `saved` (or `unchanged` for an existing saved document).
+This is an Autodesk Fusion DataFile ID, **not a Render project ID**. Resolve it through
+Render's Autodesk integration before opening/importing it. Never infer the output from
+the active Fusion document or current Data Panel folder, which may have changed.
+A `targetDocument.id` alone is not proof of a completed cloud save. If autosave is disabled,
+a successful chat response may not include a saved file that Render can open.
+
 When the Personal Use editable count reaches its maximum (usually 10), new-document
 saving reports `save.state: blocked`, `save.code: editable_limit`, the actual count/maximum,
 and `oldestEligible` when available. “Oldest” means least recently modified among editable

@@ -1,0 +1,75 @@
+--- a/frontend/studio/app.js
++++ b/frontend/studio/app.js
+@@ -1,3 +1,4 @@
++import { configureSteveResultOpening } from "../cad/steve-design-chat.js?v=20261008-steve-open2";
+ import { mountDesignGoal, getDesignGoal, setDesignGoal } from "../components/design-goal.js?v=20261007-concise-goal-3";
+ import { DEFAULT_AI_MODEL, ASTRA_MODEL_OPTIONS } from "../components/ai-model-defaults.js?v=astra-default1&astraoffice=20260917-1&gpt61sol=20261001-1";
+ import { loadModelReasoning, modelReasoningOptions, modelReasoningOptionsHTML, modelReasoningRequestField, storeModelReasoning } from "../components/model-reasoning.js?v=20261001-1";
+@@ -313,7 +314,7 @@
+ import { createStorePreferencesUI } from "../marketplace/store-preferences.js?v=20260908-store-ux-storepop1-proftabs1&leakfix72";
+ import { openStoreListingPopup } from "../marketplace/store-listing-popup.js?v=20260909-storepop1";
+ import { createWorkspaceManagementUI } from "../workspace/workspace-management.js?v=20260826-mgmt-dash&leakfix54";
+-import { createRenderAgent } from "../components/render-agent.js?v=20261008-steve-chat3&steve-guidance=20261008-1";
++import { createRenderAgent } from "../components/render-agent.js?v=20261008-steve-open2&steve-guidance=20261008-1";
+ import { createCollab } from "../social/collab.js?v=20260907-xr-avatar2-20260916-vrsharemesh1&editctx=20260915-1&editscale=20260915-1&cvinvite=20260916-1";
+ import { createRibbon } from "./ribbon.js?v=20260928-top-toolbar-trim1";
+ import {
+@@ -15918,10 +15919,23 @@
+   return mode;
+ }
+ 
++configureSteveResultOpening({
++  api,
++  getOwner: () => ({ userId: String(currentUser?.id || ""), projectId: String(projectId || "") }),
++  openFile: async (result, isCurrent) => {
++    if (!isCurrent()) return false;
++    await refreshFiles();
++    if (!isCurrent()) return false;
++    return loadModel(projectFileUrl(result.project_id, result.filename), result.filename, {
++      projectId: result.project_id, catalogFilename: result.filename, label: result.name,
++      append: true, cacheBust: true, fitView: true, isCurrent,
++    });
++  },
++});
+ let steveIntegrationPromise = null;
+ function getSteveIntegration() {
+   if (!steveIntegrationPromise) {
+-    steveIntegrationPromise = import("../cad/steve-design-chat.js?v=20261008-steve-chat3").then((mod) => mod.mountSteveDesignChat({
++    steveIntegrationPromise = import("../cad/steve-design-chat.js?v=20261008-steve-open2").then((mod) => mod.mountSteveDesignChat({
+       getPrompt: () => composer?.getPromptText?.() || "",
+       getFusionStatus: () => api("/api/autodesk/status"),
+       connectFusion: () => document.getElementById("btn-fusion-connect")?.click(),
+@@ -33115,7 +33129,7 @@
+     artifactRevision: loadedArtifact.revision,
+   };
+ 
+-  if (gen !== loadModelGeneration || expectedProjectId !== projectId) {
++  if (gen !== loadModelGeneration || expectedProjectId !== projectId || opts.isCurrent?.() === false) {
+     disposeStyledModel(object);
+     return false;
+   }
+--- a/frontend/components/render-agent.js
++++ b/frontend/components/render-agent.js
+@@ -1,4 +1,4 @@
+-import { steveDesignChat, mountSteveReplyRecovery } from "../cad/steve-design-chat.js?v=20261008-steve-chat3";
++import { steveDesignChat, mountSteveReplyRecovery, mountSteveSavedResult } from "../cad/steve-design-chat.js?v=20261008-steve-open2";
+ import { mountDesignGoal, getDesignGoal } from "./design-goal.js?v=20261007-concise-goal-3";
+ import { mountDesignReview } from "./design-review.js?v=20261008-design-review-3";
+ import { prepareDesignReferenceContext } from "./design-reference-context.js?v=20261007-concise-goal-1";
+@@ -2232,7 +2232,7 @@
+     const localMessages = designChatLocalMessages.filter((item) => item.projectId === projectId);
+     const messages = [
+       ...designChatProjectHistory,
+-      ...steveDesignChat.messages(steveChatOwner()),
++      ...steveDesignChat.messages(steveChatOwner(), { includeResults: true }),
+       ...(designChatThreadProjectId === projectId ? designChatThread?.messages || [] : []),
+       ...localMessages,
+     ];
+@@ -2276,6 +2276,7 @@
+       body.className = "prompt-design-message-body";
+       body.innerHTML = renderMessageText(visible);
+       row.append(label, body);
++      mountSteveSavedResult(row, item, steveChatOwner());
+       if (item.role === "assistant" && Array.isArray(item.sources) && item.sources.length) {
+         const sources = document.createElement("nav");
+         sources.className = "prompt-design-sources";

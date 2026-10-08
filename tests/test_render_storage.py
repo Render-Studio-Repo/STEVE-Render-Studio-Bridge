@@ -42,6 +42,24 @@ class StorageTests(unittest.TestCase):
         self.storage.run_main()
         self.assertEqual(self.feed.read('request',0)['snapshot']['save']['state'],'saved')
         self.assertFalse(self.storage.saving())
+    def test_completed_result_identifies_the_saved_file_not_active_folder(self):
+        self.start()
+        self.storage.run_main()
+        cursor = self.feed.read('request', 0)['cursor']
+        self.doc.dataFile = self.savedfile()
+        self.doc.isSaved = True
+        self.app.data.activeFolder = O(id='unrelated-folder', name='Other')
+        self.storage.jobs['request']['next'] = 0
+        self.storage.run_main()
+        result = self.feed.read('request', cursor)
+        completed = next(event for event in result['events'] if event.get('phase') == 'completed')
+        self.assertEqual(completed['save'], {
+            'state': 'saved', 'file': {'id': 'file', 'name': 'Bracket'},
+            'folder': {'id': 'folder', 'name': 'Render'},
+            'project': {'id': 'project', 'name': 'Robots'},
+        })
+        self.assertEqual(self.feed.read('request', 0)['snapshot']['save'], completed['save'])
+
     def test_existing_document_saves_in_place(self):
         self.doc.isSaved=True;self.doc.dataFile=self.savedfile()
         self.start();self.storage.run_main()

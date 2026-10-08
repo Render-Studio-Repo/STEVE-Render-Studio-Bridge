@@ -6,9 +6,9 @@ picker). It is an integration bundle, not the entire Render Studio application.
 
 ## Files to deploy
 
-Copy `steve-connector.js`, `steve-chat-feed.js`, `steve-design-chat.js`,
+Copy `steve-connector.js`, `steve-chat-feed.js`, `steve-design-chat.js`, `steve-result-open.js`,
 `steve-connector.css`, and `steve-setup.css` into Render's `frontend/cad/`.
-Load both stylesheets. Keep the three JavaScript modules together.
+Load both stylesheets. Keep these JavaScript modules together.
 Copy [`examples/render-storage-settings.js`](../../examples/render-storage-settings.js)
 to `frontend/cad/steve-storage-settings.js`. That example is the canonical settings source;
 there is intentionally no second copy here. Merge `connector-fragment.html` into the CAD
@@ -23,7 +23,7 @@ In `frontend/studio/app.js`, keep one integration promise for the page lifetime:
 ```js
 let steveIntegrationPromise;
 function getSteveIntegration() {
-  return steveIntegrationPromise ||= import('../cad/steve-design-chat.js?v=20261008-steve-chat3')
+  return steveIntegrationPromise ||= import('../cad/steve-design-chat.js?v=20261008-steve-open2')
     .then(mod => mod.mountSteveDesignChat({
       getPrompt: () => composer?.getPromptText?.() || '',
       getFusionStatus: () => api('/api/autodesk/status'),
@@ -136,7 +136,7 @@ In Render's `frontend/components/render-agent.js` (the Design Chat host), import
 
 ```js
 import { steveDesignChat, mountSteveReplyRecovery }
-  from '../cad/steve-design-chat.js?v=20261008-steve-chat3';
+  from '../cad/steve-design-chat.js?v=20261008-steve-open2';
 const steveChatOwner = () => ({
   userId: String(currentUserId() || ''),
   projectId: String(getProjectId() || ''),
@@ -175,6 +175,66 @@ This watches Render-submitted requests; it does not mirror unrelated Fusion-only
 Increment the host app and module query versions on deployment. A green connection badge
 alone does not verify chat rendering: the wrapper **and** host rendering hooks are required.
 See also the [protocol guide](../../docs/EXTERNAL_BRIDGE.md#live-design-chat-feed-capabilitieschatevents).
+
+## Automatically open the completed design
+
+New requests submitted through `mountSteveDesignChat` record an automatic-open intent.
+After Fusion confirms the save, `steve-result-open.js` resolves the exact saved Autodesk
+project through the linked account's hubs and calls the existing `/api/autodesk/import`
+endpoint with the saved file/folder IDs and the **originating Render project** as its target.
+It opens the returned displayable filename in that project's viewport.
+
+The [minimal host patch](auto-open-host.patch) shows the app and chat changes against
+the previous deployed chat integration. Review/apply it against your current host source;
+it includes the viewer's final account/project guard. Copy the modules above as well,
+and update the host HTML script version to bypass cached code.
+
+Configure this once in the host application:
+
+```js
+import { configureSteveResultOpening }
+  from '../cad/steve-design-chat.js?v=20261008-steve-open2';
+configureSteveResultOpening({
+  api,
+  getOwner: () => ({
+    userId: String(currentUser?.id || ''),
+    projectId: String(projectId || ''),
+  }),
+  openFile: async (result, isCurrent) => {
+    if (!isCurrent()) return false;
+    await refreshFiles();
+    if (!isCurrent()) return false;
+    return loadModel(projectFileUrl(result.project_id, result.filename), result.filename, {
+      projectId: result.project_id, catalogFilename: result.filename, label: result.name,
+      append: true, cacheBust: true, fitView: true, isCurrent,
+    });
+  },
+});
+```
+
+These are Render's existing API/viewer adapters. An equivalent host loader **must honor**
+`isCurrent` before changing the scene, including after asynchronous downloads/conversion.
+The current Render `loadModel` implements this guard. Importing requires the existing
+Autodesk account integration; pairing with the local STEVE bridge alone is insufficient.
+
+In the Design Chat renderer, request
+`steveDesignChat.messages(owner, { includeResults: true })`. Import
+`mountSteveSavedResult` from the same module and call
+`mountSteveSavedResult(row, message, owner)` after rendering a result row. Keep result
+controls out of the AI conversation context by leaving `includeResults` false there.
+
+Auto-open runs only for new submitted requests with a confirmed saved location. Recovered
+historical replies do not auto-import. Switching account/project defers opening to an
+explicit **Open saved design in Render** action in the original project. Missing metadata
+shows **Open Fusion library** and **Check save status** instead. Autosave must be enabled
+for deterministic saved-file metadata; old `unchanged` results that lack project/folder
+metadata also use the library fallback.
+
+A browser Web Lock coordinates each request across tabs, and an import claim is persisted
+before sending the import. Refreshing or repeated completion events do not duplicate the
+import. If the import response is lost, the UI directs the user to check project files or
+the Fusion library instead of silently repeating it. Successful imports can be reopened
+without importing again. This adds the result alongside the existing viewport models.
 
 ## Verification
 
