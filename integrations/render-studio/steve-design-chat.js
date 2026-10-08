@@ -1,6 +1,6 @@
 import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-steve-integration3";
 import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-steve-open2";
-import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-integration3";
+import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-auth-ping1";
 import { isSteveChatComplete } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 
 const PREFIX = "render3d:steveDesignChat:v1:";
@@ -24,6 +24,7 @@ export class SteveDesignChat {
     this.notified = new Map();
     this.onSnapshot = () => {};
     this.discovering = new Map();
+    this.recoveryConnectors = new Map();
     this.onPreviewRecord = () => {};
   }
   get store() { return this.storage || globalThis.localStorage; }
@@ -145,7 +146,12 @@ export class SteveDesignChat {
     const key = ownerKey(owner);
     if (this.discovering.has(key)) return this.discovering.get(key);
     const existing = this.records(owner).at(-1);
-    const connector = this.createConnector();
+    let connector = this.recoveryConnectors.get(key);
+    if (!connector) {
+      connector = this.createConnector();
+      this.recoveryConnectors.set(key, connector);
+      if (this.recoveryConnectors.size > 8) this.recoveryConnectors.delete(this.recoveryConnectors.keys().next().value);
+    }
     const pending = Promise.resolve().then(() => connector.latest(owner)).then(result => {
       const snapshot = result?.snapshot;
       if (!snapshot) return existing || null;

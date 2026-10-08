@@ -162,7 +162,8 @@ export function createIndexedDbSecretStore(indexedDb = globalThis.indexedDB) {
       return await new Promise((resolve, reject) => {
         const tx = db.transaction(SECRET_STORE, mode);
         const request = run(tx.objectStore(SECRET_STORE));
-        request.onsuccess = () => resolve(request.result ?? null);
+        tx.oncomplete = () => resolve(request.result ?? null);
+        tx.onabort = () => reject(tx.error || new Error("STEVE secret storage transaction aborted."));
         request.onerror = () => reject(request.error || new Error("STEVE secret storage failed."));
       });
     } finally {
@@ -203,6 +204,11 @@ export class SteveConnector {
     this.timer = null;
     this.secret = null;
     this.error = null;
+    this.authFailure = null;
+    this.authRetryAt = 0;
+    this.authFailures = 0;
+    this.authVerifiedAt = 0;
+    this.reconnectNeeded = false;
   }
 
   snapshot() {
@@ -241,22 +247,69 @@ export class SteveConnector {
     }, delay);
   }
 
+  async refreshSecret() {
+    try {
+      const secret = await this.secretStore.read();
+      if (secret !== this.secret) {
+        this.authFailure = null; this.authRetryAt = 0; this.authFailures = 0;
+        this.authVerifiedAt = 0; this.reconnectNeeded = false;
+      }
+      this.secret = secret || null;
+    } catch { /* Keep the in-memory credential during a temporary IndexedDB failure. */ }
+    return this.secret;
+  }
+
   async request(path, options = {}) {
     if (!this.fetchFn) throw new TypeError("Fetch is unavailable.");
+    const signed = Boolean(options.headers?.["X-Steve-Signature"]);
+    const recoveryRead = path === "/events" || path === "/preview" || path === "/ping";
+    if (signed && recoveryRead && this.authFailure && Date.now() < this.authRetryAt) throw this.authFailure;
     const response = await this.fetchFn(`${this.baseUrl}${API_VERSION}${path}`, options);
     const body = await readJson(response);
-    if (!response.ok) throw responseError(response, body);
+    if (!response.ok) {
+      const error = responseError(response, body);
+      if (signed && (error.status === 401 || error.status === 403)) {
+        this.authVerifiedAt = 0;
+        this.reconnectNeeded = error.code === "invalid_signature";
+        this.authFailures += 1;
+        this.authRetryAt = Date.now() + Math.min(30000, 3000 * 2 ** Math.min(4, this.authFailures - 1));
+        error.message = "STEVE authentication is unavailable. Saved pairing is retained; chat will retry automatically. Use Connect if pairing was revoked.";
+        this.authFailure = error;
+      }
+      throw error;
+    }
+    if (signed) { this.authFailure = null; this.authRetryAt = 0; this.authFailures = 0; this.authVerifiedAt = Date.now(); this.reconnectNeeded = false; }
     return body;
+  }
+
+  async probePairing() {
+    if (this.authFailure && Date.now() < this.authRetryAt) throw this.authFailure;
+    const body = "{}";
+    const requestId = this.cryptoApi.randomUUID(), timestamp = String(Math.floor(Date.now() / 1000)), nonce = randomNonce(this.cryptoApi);
+    const signature = await signSteveSubmission({ secret: this.secret, body, requestId,
+      timestamp, nonce, cryptoApi: this.cryptoApi, path: "/v1/ping" });
+    const result = await this.request("/ping", { method: "POST", body, signal: AbortSignal.timeout(15000),
+      headers: { "Content-Type": "application/json", "X-Request-Id": requestId,
+        "X-Steve-Timestamp": timestamp, "X-Steve-Nonce": nonce, "X-Steve-Signature": signature } });
+    if (result?.authenticated !== true) {
+      this.authVerifiedAt = 0;
+      throw new Error("STEVE did not confirm the saved pairing.");
+    }
+    return result;
   }
 
   async poll() {
     if (!this.active) return this.snapshot();
     try {
-      const status = await this.request("/status", { method: "GET", cache: "no-store" });
-      const state = classifySteveStatus(status, { hasSecret: Boolean(this.secret) });
+      await this.refreshSecret();
+      const status = await this.request("/status", { method: "GET", cache: "no-store", signal: AbortSignal.timeout(15000) });
+      if (this.secret && status?.fusionRunning && status?.connected && status?.capabilities?.authPing === true) await this.probePairing();
+      if (!status?.fusionRunning || !status?.connected) this.authVerifiedAt = 0;
+      const state = classifySteveStatus(status, { hasSecret: Boolean(this.secret) && !this.authFailure });
       this.emit(state, { status });
     } catch (error) {
-      const state = error?.status === 426 ? "incompatible" : error?.status ? "error" : "unavailable";
+      this.authVerifiedAt = 0;
+      const state = error?.status === 401 || error?.status === 403 ? "detected" : error?.status === 426 ? "incompatible" : error?.status ? "error" : "unavailable";
       this.emit(state, { status: null, error });
     } finally {
       this.queuePoll();
@@ -293,6 +346,7 @@ export class SteveConnector {
         if (!completed.secret) throw new Error("STEVE approved pairing without a secret.");
         this.secret = completed.secret;
         await this.secretStore.write(this.secret);
+        this.authFailure = null; this.authRetryAt = 0; this.authFailures = 0;
         await this.poll();
         return this.snapshot();
       } catch (error) {
@@ -309,7 +363,7 @@ export class SteveConnector {
   }
 
   async storage(payload, { requestId = this.cryptoApi.randomUUID() } = {}) {
-    if (!this.secret) this.secret = await this.secretStore.read();
+    await this.refreshSecret();
     if (!this.secret) throw new Error("Connect STEVE in the CAD engine menu, then retry here.");
     const post = async (path, value, id) => {
       const body = JSON.stringify(value);
@@ -324,10 +378,8 @@ export class SteveConnector {
         } });
       } catch (error) {
         if (error.status === 401 || error.status === 403) {
-          this.secret = null;
-          await this.secretStore.clear();
           this.emit("detected", { error });
-          throw new Error("Reconnect STEVE in the CAD engine menu, then retry here.");
+          throw error;
         }
         if (error.status === 404) throw new Error("Update and restart the STEVE add-in to use Fusion storage settings.");
         throw error;
@@ -349,10 +401,12 @@ export class SteveConnector {
   }
 
   async watch(requestId, options = {}) {
-    if (!this.secret) this.secret = await this.secretStore.read();
+    await this.refreshSecret();
     if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
     try {
       return await watchSteveChat({ ...options, requestId, post: async (payload, signal) => {
+      await this.refreshSecret();
+      if (!this.secret) throw Object.assign(new Error("Connect Render Studio to STEVE first."), { status: 401 });
       const body = JSON.stringify(payload);
       const id = this.cryptoApi.randomUUID();
       const timestamp = String(Math.floor(Date.now() / 1000));
@@ -366,10 +420,7 @@ export class SteveConnector {
       } });
     } catch (error) {
       if (error.status === 401 || error.status === 403) {
-        this.secret = null;
-        try { await this.secretStore.clear(); } catch {}
         this.emit("detected", { error });
-        error.message = "Reconnect STEVE in the CAD engine menu, then recover this request.";
       }
       throw error;
     }
@@ -384,7 +435,7 @@ export class SteveConnector {
       }
       this.previewCapability = true;
     }
-    if (!this.secret) this.secret = await this.secretStore.read();
+    await this.refreshSecret();
     if (!this.secret) throw Object.assign(new Error("Reconnect STEVE to view live Fusion geometry."), { status: 401 });
     const body = JSON.stringify({ requestId, afterRevision });
     const id = this.cryptoApi.randomUUID(), timestamp = String(Math.floor(Date.now() / 1000)), nonce = randomNonce(this.cryptoApi);
@@ -396,10 +447,8 @@ export class SteveConnector {
           "X-Steve-Timestamp": timestamp, "X-Steve-Nonce": nonce, "X-Steve-Signature": signature } });
     } catch (error) {
       if (error.status === 401 || error.status === 403) {
-        this.secret = null; this.previewCapability = false;
-        try { await this.secretStore.clear(); } catch {}
+        this.previewCapability = false;
         this.emit("detected", { error });
-        error.message = "Reconnect STEVE to view live Fusion geometry.";
       }
       throw error;
     }
@@ -415,7 +464,7 @@ export class SteveConnector {
       error.code = "steve_project_history_unavailable";
       throw error;
     }
-    if (!this.secret) this.secret = await this.secretStore.read();
+    await this.refreshSecret();
     if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
     const body = JSON.stringify({ renderProjectId, renderUserId, after: 0 });
     const id = this.cryptoApi.randomUUID();
@@ -429,10 +478,7 @@ export class SteveConnector {
           "X-Steve-Timestamp": timestamp, "X-Steve-Nonce": nonce, "X-Steve-Signature": signature } });
     } catch (error) {
       if (error.status === 401 || error.status === 403) {
-        this.secret = null;
-        try { await this.secretStore.clear(); } catch {}
         this.emit("detected", { error });
-        error.message = "Reconnect STEVE in the CAD engine menu to restore this project's chat.";
       }
       throw error;
     }
@@ -441,6 +487,7 @@ export class SteveConnector {
   async submit({ prompt, projectId, folderId, renderProjectId, renderUserId, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
     const cleanPrompt = String(prompt || "").trim();
     if (!cleanPrompt) throw new Error("Enter a CAD prompt before sending to STEVE.");
+    await this.refreshSecret();
     if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
     if (this.state !== "ready") throw new Error(STEVE_STATE_VIEW[this.state].recovery);
     if (Boolean(renderProjectId) !== Boolean(renderUserId)) throw new Error("Both Render project and user IDs are required.");
@@ -481,8 +528,6 @@ export class SteveConnector {
       return { ...result, requestId };
     } catch (error) {
       if (error?.status === 401 || error?.status === 403) {
-        this.secret = null;
-        try { await this.secretStore.clear(); } catch { /* best effort */ }
         this.emit("detected", { error });
       } else {
         this.emit("error", { error });

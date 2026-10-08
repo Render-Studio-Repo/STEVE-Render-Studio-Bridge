@@ -6,9 +6,11 @@ from hashlib import sha256
 import hmac
 from http.server import BaseHTTPRequestHandler
 import json
+import os
 from pathlib import Path
 import secrets
 import threading
+import tempfile
 import time
 from urllib.parse import urlsplit
 
@@ -177,6 +179,47 @@ class ExternalBridge:
         self._requests = OrderedDict()
         self._server = None
         self._thread = None
+        self._auth_not_before = 0
+        self._restore_pairing()
+
+    def _restore_pairing(self):
+        if not self._config_path:
+            return
+        path = self._config_path.with_name('render-pairing.json')
+        try:
+            if not path.exists():
+                return
+            if path.is_symlink() or path.stat().st_mode & 0o077:
+                raise ValueError('Pairing file must be private.')
+            saved = json.loads(path.read_text(encoding='utf-8'))
+            secret = saved.get('secret')
+            if saved.get('renderOrigin') != self._render_origin:
+                return
+            if not isinstance(secret, str) or not 32 <= len(secret) <= 128:
+                raise ValueError('Invalid saved pairing.')
+            self._secret = secret
+            self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.PAIRED)
+            # Nonces are memory-only: reject pre-restart requests even inside
+            # the ordinary timestamp window when restoring the same key.
+            self._auth_not_before = int(self._clock()) + 1
+        except (OSError, ValueError, TypeError, AttributeError):
+            self._config_error = 'Saved pairing could not be loaded; connect Render Studio again.'
+
+    def _persist_pairing(self, secret):
+        if not self._config_path:
+            return
+        path = self._config_path.with_name('render-pairing.json')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix='.render-pairing-', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                json.dump({'renderOrigin': self._render_origin, 'secret': secret}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     @property
     def port(self):
@@ -228,13 +271,13 @@ class ExternalBridge:
             return {
                 "version": state.version,
                 "phase": state.phase.value,
-                "connected": state.phase is ConnectionPhase.PAIRED,
+                "connected": bool(self._secret),
                 "fusionRunning": bool(readiness.get("fusionRunning", True)),
                 "providerReady": bool(readiness.get("providerReady", False)),
                 "busy": bool(readiness.get("busy", False)),
-                "ready": state.phase is ConnectionPhase.PAIRED and bool(readiness.get("providerReady", False)),
+                "ready": bool(self._secret) and bool(readiness.get("providerReady", False)),
                 "pairingId": state.pairing_id,
-                "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "livePreview": self.preview is not None, "storageSettings": self.storage is not None, "autoSave": self.storage is not None, "autoReadOnly": False},
+                "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "livePreview": self.preview is not None, "storageSettings": self.storage is not None, "autoSave": self.storage is not None, "autoReadOnly": False},
                 "queueDepth": len(self._commands),
             }
 
@@ -249,6 +292,7 @@ class ExternalBridge:
             if self._config_path:
                 from .update_transaction import write_json
                 self._config_path.parent.mkdir(parents=True, exist_ok=True)
+                self._config_path.with_name('render-pairing.json').unlink(missing_ok=True)
                 write_json(self._config_path, {"renderOrigin": origin})
             self._render_origin = origin
             self._origins = frozenset({origin})
@@ -287,8 +331,6 @@ class ExternalBridge:
         with self._lock:
             if self._state.phase is ConnectionPhase.STOPPED:
                 raise BridgeError(503, "stopped", "The bridge is stopped.")
-            if self._state.phase is ConnectionPhase.PAIRED:
-                raise BridgeError(409, "already_paired", "Render Studio is already paired.")
             if self._state.phase in {ConnectionPhase.PAIRING_PENDING, ConnectionPhase.PAIRING_APPROVED}:
                 return self._state.pairing_id
             pairing_id = secrets.token_urlsafe(24)
@@ -321,11 +363,12 @@ class ExternalBridge:
             if self._state.phase is ConnectionPhase.PAIRING_PENDING:
                 raise BridgeError(409, "pairing_pending", "Pairing approval is pending.")
             if self._state.phase is ConnectionPhase.PAIRING_DENIED:
-                self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.UNPAIRED)
+                self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.PAIRED if self._secret else ConnectionPhase.UNPAIRED)
                 raise BridgeError(403, "pairing_denied", "Pairing was denied.")
             if self._state.phase is not ConnectionPhase.PAIRING_APPROVED or not self._pending_secret:
                 raise BridgeError(410, "pairing_complete", "Pairing was already completed.")
             secret = self._pending_secret
+            self._persist_pairing(secret)
             self._pending_secret = None
             self._secret = secret
             self._nonces.clear()
@@ -357,13 +400,13 @@ class ExternalBridge:
             timestamp_number = int(timestamp)
         except ValueError:
             raise BridgeError(401, "invalid_auth", "Authentication headers are invalid.")
-        if abs(self._clock() - timestamp_number) > AUTH_WINDOW_SECONDS:
+        if timestamp_number < self._auth_not_before or abs(self._clock() - timestamp_number) > AUTH_WINDOW_SECONDS:
             raise BridgeError(401, "expired", "The request timestamp is outside the allowed window.")
         body_hash = sha256(body).hexdigest()
         signed = f"{handler.command}\n{handler.path}\n{timestamp}\n{nonce}\n{request_id}\n{body_hash}".encode()
         with self._lock:
             secret = self._secret
-            if self._state.phase is not ConnectionPhase.PAIRED or not secret:
+            if not secret:
                 raise BridgeError(401, "not_paired", "Pair Render Studio with STEVE first.")
             expected = hmac.new(secret.encode(), signed, sha256).hexdigest()
             if not hmac.compare_digest(signature, expected):
@@ -407,7 +450,7 @@ class ExternalBridge:
             with self._lock:
                 self._last_contact = self._clock()
             if handler.command == "OPTIONS":
-                if handler.path not in {"/v1/status", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions", "/v1/events", "/v1/storage", "/v1/storage/result", "/v1/preview"}:
+                if handler.path not in {"/v1/status", "/v1/ping", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions", "/v1/events", "/v1/storage", "/v1/storage/result", "/v1/preview"}:
                     raise BridgeError(404, "not_found", "Route not found.")
                 self._send(handler, 204, None, origin)
                 return
@@ -425,6 +468,11 @@ class ExternalBridge:
                 body = handler.rfile.read(length)
             if handler.command == "GET" and handler.path == "/v1/status":
                 result, status = self.status(), 200
+            elif handler.command == "POST" and handler.path == "/v1/ping":
+                self._authenticate(handler, body)
+                if self._json(body):
+                    raise BridgeError(400, "invalid_request", "Ping body must be empty.")
+                result, status = {"version": PROTOCOL_VERSION, "authenticated": True}, 200
             elif handler.command == "POST" and handler.path == "/v1/pairing/request":
                 if body not in (b"", b"{}"):
                     raise BridgeError(400, "invalid_request", "The pairing request body must be empty.")

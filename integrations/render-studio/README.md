@@ -267,13 +267,13 @@ minimal host changes against the deployed Render version; review it and merge th
 relevant hunks when your host differs. Preserve existing host imports, history-sync
 hooks and setup controls. Do not replace whole host files.
 
-Use one identical `steve-design-chat.js?v=20261008-steve-integration3` import URL in the
+Use one identical `steve-design-chat.js?v=20261008-steve-auth-ping1` import URL in the
 application's static import, dynamic STEVE loader and Design Chat renderer. Bump the
 outer app/render-agent script URLs too so browsers load the new dependencies.
 
 ```js
 import { configureSteveLivePreview }
-  from '../cad/steve-design-chat.js?v=20261008-steve-integration3';
+  from '../cad/steve-design-chat.js?v=20261008-steve-auth-ping1';
 import { serializeStevePrompt }
   from '../cad/steve-prompt-text.js?v=20261008-steve-integration3';
 
@@ -309,8 +309,16 @@ Positions are millimetres and Z-up. Switching account/project clears the preview
 Errors retain the last good geometry and show a status message. Restarted bridges can
 return `reset:true` with a lower revision and a full validated snapshot.
 
-Pairing is browser-local. If Render says to connect STEVE first, use the normal STEVE
-setup UI and approve in Fusion. Never paste a pairing secret into logs or scripts.
+Pairing is browser-local in IndexedDB, and STEVE retains the approved key in an
+origin-bound `render-pairing.json` file with owner-only permissions. Normal Fusion
+restarts restore that pairing. Changing the Render address revokes it. Pre-restart
+signed requests are rejected; clients can retry with a fresh timestamp.
+
+If browser storage was cleared, use the normal STEVE setup UI and approve in Fusion
+once. An explicit replacement pairing preserves the previous key until approval
+completes; denial retains the existing connection. Never paste a pairing secret into
+logs or scripts. STEVE now opens its panel automatically when the add-in starts;
+enable **Run on Startup** for the active installation in Fusion.
 A paired Fusion server does not prove this browser has its matching key. Refresh after
 installing the new scripts. Cloud Autodesk integration is still used for the saved-file
 library/import; the live mesh itself comes directly from the local Fusion bridge.
@@ -319,3 +327,8 @@ Reference serialization sends plain URLs and available text, not Render-only ref
 chips. Local/protected images are identified as needing a direct attachment. It does
 not transfer image pixels into STEVE or create a Fusion canvas. See the bridge guide
 for provider-specific web access limitations.
+
+Connection polling uses signed `POST /v1/ping` when `capabilities.authPing` is true.
+This validates the stored key without submitting modeling work. Transient authentication
+errors retain the key and retry with backoff; tabs adopt a newly approved key from
+IndexedDB automatically. No modeling submissions are automatically replayed.

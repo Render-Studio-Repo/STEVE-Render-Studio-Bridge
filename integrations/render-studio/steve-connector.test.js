@@ -88,8 +88,8 @@ test("pairing waits for Fusion approval and stores the returned secret", async (
     response(200, { version: "1.0.0", fusionRunning: true, connected: true, providerReady: true, ready: true }),
   ];
   const connector = new SteveConnector({
-    fetchFn: async (url, options) => { calls.push([url, options]); return replies.shift(); },
-    secretStore: { read: async () => null, write: async (value) => writes.push(value), clear: async () => {} },
+    fetchFn: async (url, options) => { calls.push([url, options]); if (url.endsWith("/storage")) return response(202, { pending: true }); return replies.shift(); },
+    secretStore: { read: async () => writes.at(-1) || null, write: async (value) => writes.push(value), clear: async () => {} },
     schedule: (fn) => { queueMicrotask(fn); return 1; },
     cancelSchedule: () => {},
   });
@@ -160,9 +160,10 @@ test("storage rejects stale pairing and main-thread errors", async () => {
   const connector = new SteveConnector({ cryptoApi: webcrypto,
     secretStore: {read: async () => "expired", clear: async () => {cleared = true;}},
     fetchFn: async () => response(401, {error: "bad signature"}) });
-  await assert.rejects(connector.storage({action:"getSettings"}), /Reconnect STEVE/);
-  assert.equal(cleared, true);
+  await assert.rejects(connector.storage({action:"getSettings"}), /Saved pairing is retained/);
+  assert.equal(cleared, false);
   connector.secret = "current";
+  connector.secretStore.read = async () => "current";
   connector.fetchFn = async () => response(200, {pending:false,error:"Folder is inaccessible"});
   await assert.rejects(connector.storage({action:"folders"}), /Folder is inaccessible/);
 });
@@ -177,16 +178,16 @@ test("old bridge never receives unsupported project lookup", async () => {
   assert.match(paths[0], /status$/);
 });
 
-test("latest invalidates stale pairing on 401", async () => {
+test("latest retains stored pairing on 401", async () => {
   let cleared = false;
   const connector = new SteveConnector({ cryptoApi: webcrypto,
     secretStore: { read: async () => "secret", clear: async () => { cleared = true; } },
     fetchFn: async url => url.endsWith("/status")
       ? response(200, { capabilities: { projectChatHistory: true } }) : response(401, { error: "unauthorized" }),
   });
-  await assert.rejects(connector.latest({ userId: "alice", projectId: "a" }), /Reconnect STEVE/);
-  assert.equal(cleared, true);
-  assert.equal(connector.secret, null);
+  await assert.rejects(connector.latest({ userId: "alice", projectId: "a" }), /Saved pairing is retained/);
+  assert.equal(cleared, false);
+  assert.equal(connector.secret, "secret");
 });
 
 test("submission keeps Autodesk and Render identities separate and requires owner pair", async () => {
@@ -244,4 +245,80 @@ test("latest request discovery is signed and scoped to the active Render project
   assert.equal(captured.url, "http://127.0.0.1:38173/v1/events");
   assert.equal(captured.options.body, '{"renderProjectId":"project-88b644e1","renderUserId":"user-1","after":0}');
   assert.match(captured.options.headers["X-Steve-Signature"], /^[0-9a-f]{64}$/);
+});
+
+test("recovery retains pairing through restart, backs off, and adopts another tab approval", async () => {
+  let stored = "old", calls = 0, cleared = 0, restored = false;
+  const connector = new SteveConnector({ cryptoApi: webcrypto,
+    secretStore: { read: async () => stored, clear: async () => { cleared++; } },
+    fetchFn: async url => {
+      if (url.endsWith("/status")) return response(200, { capabilities: { projectChatHistory: true } });
+      calls++;
+      return restored ? response(200, { snapshot: { requestId: "request-1" } })
+        : response(401, { error: { code: "not_paired", message: "Restarting" } });
+    },
+  });
+  const owner = { userId: "alice", projectId: "a" };
+  await assert.rejects(connector.latest(owner));
+  await assert.rejects(connector.latest(owner));
+  assert.equal(calls, 1); assert.equal(cleared, 0); assert.equal(stored, "old");
+  connector.authRetryAt = 0; restored = true;
+  await connector.latest(owner);
+  assert.equal(calls, 2); assert.equal(connector.authFailure, null);
+  connector.authFailure = Object.assign(new Error("old rejected"), { status: 403 });
+  connector.authRetryAt = Date.now() + 30000; stored = "new-approved";
+  await connector.latest(owner);
+  assert.equal(connector.secret, "new-approved"); assert.equal(calls, 3);
+});
+
+test("status polling rereads browser pairing without starting approval or deleting credentials", async () => {
+  let stored = null; const paths = [];
+  const connector = new SteveConnector({
+    secretStore: { read: async () => stored, clear: async () => { throw new Error("must not clear"); } },
+    schedule: () => 1, cancelSchedule: () => {},
+    fetchFn: async url => { paths.push(url); return response(200, { version: "1.0.0", fusionRunning: true, connected: true, ready: true, providerReady: true }); },
+  });
+  await connector.activate(); assert.equal(connector.state, "detected");
+  stored = "approved-in-other-tab"; await connector.poll(); assert.equal(connector.state, "ready");
+  assert.ok(paths.every(path => path.endsWith("/status") || path.endsWith("/storage")));
+  assert.ok(paths.every(path => !path.endsWith("/ping")));
+  connector.deactivate();
+});
+
+test("403 origin rejection cannot erase a newer secret written while an older request is in flight", async () => {
+  let stored = "old"; let clears = 0;
+  const connector = new SteveConnector({ cryptoApi: webcrypto,
+    secretStore: { read: async () => stored, clear: async () => { clears++; } },
+    fetchFn: async url => {
+      if (url.endsWith("/status")) return response(200, { capabilities: { projectChatHistory: true } });
+      stored = "new-approved"; return response(403, { error: { code: "origin_denied" } });
+    },
+  });
+  await assert.rejects(connector.latest({ userId: "alice", projectId: "a" }));
+  assert.equal(stored, "new-approved"); assert.equal(clears, 0);
+  await connector.refreshSecret();
+  assert.equal(connector.secret, "new-approved"); assert.equal(connector.authFailure, null);
+});
+
+test("public ready status cannot verify an invalid stored key; capability-gated signed ping clears same-connector failure after backoff", async () => {
+  let accepted = false, probes = 0, clears = 0;
+  const connector = new SteveConnector({ cryptoApi: webcrypto, schedule: () => 1, cancelSchedule: () => {},
+    secretStore: { read: async () => "saved-key", clear: async () => { clears++; } },
+    fetchFn: async (url, options) => {
+      if (url.endsWith("/status")) return response(200, { fusionRunning: true, connected: true, ready: true, providerReady: true, capabilities: { authPing: true } });
+      assert.ok(url.endsWith("/ping"));
+      assert.deepEqual(JSON.parse(options.body), {});
+      assert.match(options.headers["X-Steve-Signature"], /^[0-9a-f]{64}$/);
+      probes++;
+      return accepted ? response(200, { authenticated: true }) : response(401, { code: "invalid_signature" });
+    },
+  });
+  await connector.activate();
+  assert.equal(connector.state, "detected"); assert.equal(connector.reconnectNeeded, true);
+  await connector.poll(); assert.equal(probes, 1);
+  accepted = true; connector.authRetryAt = 0;
+  await connector.poll(); assert.equal(probes, 2); assert.equal(connector.state, "ready");
+  assert.equal(connector.reconnectNeeded, false); assert.equal(clears, 0);
+  await connector.poll(); assert.equal(probes, 3);
+  connector.deactivate();
 });

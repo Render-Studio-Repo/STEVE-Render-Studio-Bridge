@@ -14,7 +14,7 @@ from types import SimpleNamespace as Obj
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "addin/STEVE"))
-from steve.external_bridge import ExternalBridge, MAX_QUEUE_SIZE, Submission, submission_message
+from steve.external_bridge import ExternalBridge, BridgeError, MAX_QUEUE_SIZE, Submission, submission_message
 
 
 ORIGIN = "http://render-studio.test"
@@ -122,10 +122,29 @@ class BridgeHTTPTests(unittest.TestCase):
             "busy": False,
             "ready": False,
             "pairingId": None,
-            "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "livePreview": False, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
+            "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "livePreview": False, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
             "queueDepth": 0,
         })
         self.assertNotIn("secret", json.dumps(result).lower())
+
+    def test_ping_requires_authentication_and_does_not_queue_work(self):
+        self.assertEqual(self.request('/v1/ping', 'POST', {})[0], 401)
+        secret = self.pair()
+        status, _, result = self.request('/v1/ping', 'POST', {}, self.auth(secret, {}, path='/v1/ping'))
+        self.assertEqual(status, 200)
+        self.assertTrue(result['authenticated'])
+        self.assertEqual(self.bridge.status()['queueDepth'], 0)
+        self.assertEqual(self.request('/v1/ping', 'POST', {}, self.auth('wrong', {}, path='/v1/ping'))[0], 401)
+
+    def test_restored_key_rejects_requests_signed_before_restart(self):
+        secret = self.pair()
+        now = int(time.time())
+        self.bridge._clock = lambda: now + 2
+        self.bridge._auth_not_before = now + 1
+        body = {"prompt": "Create a bracket"}
+        status, _, result = self.submit(secret, body, timestamp=now)
+        self.assertEqual((status, result['error']['code']), (401, 'expired'))
+        self.assertEqual(self.submit(secret, body, timestamp=now + 2)[0], 202)
 
     def test_pairing_requires_explicit_approval_and_secret_is_returned_once(self):
         _, _, requested = self.request("/v1/pairing/request", "POST", {})
@@ -333,6 +352,51 @@ class MainThreadAdapterTests(unittest.TestCase):
 
 
 class BridgeSettingsTests(unittest.TestCase):
+    def test_pairing_survives_restart_privately_and_stays_out_of_status(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'render-bridge.json'
+            bridge = ExternalBridge(lambda: None, config_path=config, clock=lambda: 1000)
+            pairing = bridge.request_pairing()
+            bridge.approve_pairing(pairing)
+            secret = bridge.complete_pairing(pairing)
+            self.assertEqual(config.with_name('render-pairing.json').stat().st_mode & 0o777, 0o600)
+            bridge.close()
+            restored = ExternalBridge(lambda: None, config_path=config, clock=lambda: 1001)
+            self.assertTrue(restored.status()['connected'])
+            self.assertEqual(restored._secret, secret)
+            self.assertEqual(restored._auth_not_before, 1002)
+            self.assertNotIn(secret, restored.diagnostics())
+            self.assertNotIn(secret, json.dumps(restored.status()))
+
+    def test_repair_requires_approval_and_denial_keeps_existing_key(self):
+        bridge = ExternalBridge(lambda: None)
+        pairing = bridge.request_pairing()
+        bridge.approve_pairing(pairing)
+        secret = bridge.complete_pairing(pairing)
+        replacement = bridge.request_pairing()
+        self.assertTrue(bridge.status()['connected'])
+        self.assertEqual(bridge._secret, secret)
+        bridge.deny_pairing(replacement)
+        with self.assertRaises(BridgeError):
+            bridge.complete_pairing(replacement)
+        self.assertEqual(bridge._secret, secret)
+        replacement = bridge.request_pairing()
+        bridge.approve_pairing(replacement)
+        self.assertNotEqual(bridge.complete_pairing(replacement), secret)
+
+    def test_pairing_ignores_wrong_origin_corrupt_and_public_files(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'render-bridge.json'
+            path = config.with_name('render-pairing.json')
+            for value, mode in [('[]', 0o600), ('broken', 0o600),
+                    (json.dumps({'renderOrigin':'https://other.example','secret':'x'*43}), 0o600),
+                    (json.dumps({'renderOrigin':'https://render3d.app','secret':'x'*43}), 0o644)]:
+                path.write_text(value)
+                path.chmod(mode)
+                self.assertFalse(ExternalBridge(lambda: None, config_path=config).status()['connected'])
+
     def test_address_persists_and_revokes_old_pairing(self):
         import tempfile
         with tempfile.TemporaryDirectory() as folder:
@@ -349,6 +413,9 @@ class BridgeSettingsTests(unittest.TestCase):
             self.assertNotIn(secret, bridge.diagnostics())
             restored = ExternalBridge(lambda: None, config_path=config)
             self.assertEqual(restored.connection_info()['renderOrigin'], 'https://staging.example')
+            self.assertFalse(restored.status()['connected'])
+            restored.configure('https://render3d.app')
+            self.assertFalse(ExternalBridge(lambda: None, config_path=config).status()['connected'])
 
     def test_invalid_address_does_not_revoke_pairing(self):
         bridge = ExternalBridge(lambda: None)

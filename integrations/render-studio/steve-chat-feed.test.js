@@ -76,14 +76,14 @@ test("connector signs the events path with fresh authentication IDs and stored p
 });
 
 
-test("feed authentication failure clears stale pairing and surfaces reconnect", async () => {
+test("feed authentication failure retains pairing and surfaces retry", async () => {
   let cleared = false;
   const connector = new SteveConnector({ cryptoApi: webcrypto,
     secretStore: { read: async () => "old-secret", clear: async () => { cleared = true; } },
     fetchFn: async () => ({ ok: false, status: 401, json: async () => ({ error: { message: "bad signature" } }) }),
   });
-  await assert.rejects(connector.watch("request-1"), /Reconnect STEVE/);
-  assert.equal(cleared, true);
-  assert.equal(connector.secret, null);
+  await assert.rejects(connector.watch("request-1"), /Saved pairing is retained/);
+  assert.equal(cleared, false);
+  assert.equal(connector.secret, "old-secret");
   assert.equal(connector.state, "detected");
 });
