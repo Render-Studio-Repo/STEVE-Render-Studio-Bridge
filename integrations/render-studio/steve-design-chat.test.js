@@ -229,3 +229,28 @@ test("latest 404 preserves cache without creating a phantom record", async () =>
   const record = chat.remember(owner, "request-1"); record.snapshot = complete; chat.write(record);
   assert.equal(await chat.recoverLatest(owner), record);
 });
+
+test("image and document references retain their captured owner and are not persisted as prompt prose", async () => {
+  const store = storage();
+  const chat = new SteveDesignChat({ storage: store });
+  const references = [{ type: "image", name: "Canvas", data_url: "data:image/png;base64,iVBORw0KGgo=" },
+    { type: "document", text_content: "Shaft diameter: 8 mm" }];
+  const submitted = [];
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const mutableOwner = { ...owner };
+  const work = chat.submit({ prepareSubmission: async () => { await pending; return "revision-a"; },
+    submitCurrent: async packet => { submitted.push(packet); throw new Error("Offline"); },
+    connector: { watch: async () => null },
+  }, { owner: mutableOwner, prompt: "Match this.", references, requestId: "request-images" });
+  references[0].data_url = "mutated";
+  mutableOwner.projectId = "other";
+  release();
+  await assert.rejects(work, /Offline/);
+  assert.deepEqual(submitted[0].owner, owner);
+  assert.equal(submitted[0].references[0].data_url, "data:image/png;base64,iVBORw0KGgo=");
+  assert.equal(submitted[0].references[1].text_content, "Shaft diameter: 8 mm");
+  assert.equal(chat.records(owner)[0].prompt, "Match this.");
+  assert.doesNotMatch(store.getItem(store.key(0)), /base64|Shaft diameter/);
+  chat.dispose();
+});

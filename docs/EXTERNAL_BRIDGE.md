@@ -110,13 +110,15 @@ The JSON body has this shape:
   "bindingRevision": "current binding revision",
   "projectId": "optional Autodesk project ID",
   "folderId": "optional Autodesk folder ID",
-  "designName": "optional design name"
+  "designName": "optional design name",
+  "references": [],
+  "images": []
 }
 ```
 
-The prompt limit is 32,000 characters. The complete body limit is 65,536 bytes. STEVE holds at most 16 accepted commands while Fusion is busy.
+The prompt limit is 32,000 characters. Submissions accept up to four validated images and 100,000 extracted-text characters across at most 64 references. The larger submission-only body bound accounts for base64 and JSON escaping. Other endpoints retain the 65,536-byte limit. STEVE holds at most 16 accepted commands while Fusion is busy.
 
-STEVE frames the destination and requested name before sending the request through its existing controller. With autosave enabled, saving is owned by the bridge rather than the model; see the autosave section below for destination precedence and existing-document behavior. With autosave disabled, these fields are instructions to the model and are not a deterministic save guarantee.
+STEVE puts the destination and requested name in hidden Fusion context while preserving the visible message. With autosave enabled, saving is owned by the bridge rather than the model; see the autosave section below for destination precedence and existing-document behavior. With autosave disabled, these fields are instructions to the model and are not a deterministic save guarantee.
 
 ## Browser security rules
 
@@ -150,34 +152,30 @@ Manual file changes are loaded on the next STEVE restart; the settings UI applie
 immediately. Address changes are rejected while an operation is busy or queued.
 
 
-## Web links and image references
+## Messages and references
 
-The bridge accepts a plain-text `prompt`. Preserve literal public URLs in that text;
-Render-only linked-item tokens (for example `@amazon-…`) are not URLs and cannot be
-resolved by STEVE unless Render expands them from its reference metadata. Label each
-reference and include its real source URL, image URL when available, and relevant
-known product details. Do not fabricate a source URL from an opaque item ID.
+The visible user message contains the user's text and plain public URLs. Render item
+chips resolve through their supplied metadata. Never invent a URL from an opaque item
+ID. Save destinations and pinned-document constraints travel in the existing hidden
+Fusion context, not in the visible chat message.
 
-A Render canvas, selected object, or uploaded image is not automatically transferred
-into the Fusion document. Passing an image URL supplies a text reference, not image
-pixels. Protected Render endpoints, local/blob URLs, and login-only pages may be
-unavailable to the model. Attach the image directly in STEVE when visual inspection
-is required and a public image cannot be read. Never put session cookies or API
-credentials in the prompt to make a private link work.
+The `referenceImages` and `referenceMetadata` capabilities advertise supported attachment input. The signed submission accepts pixels in `images[].url` or `references[].data_url` through STEVE's existing image input. Reference metadata can contain a name, public URL, description, and extracted `text_content`.
+PNG, JPEG, and WebP are supported, with at most four images and 1 MiB per image after
+resizing. The receiver validates decoded image data before accepting a request. Image
+pixels do not enter the chat event feed. Canvas images are reference attachments;
+attaching them does not place or calibrate a Fusion canvas in the CAD document.
+
+Structured reference metadata carries available document text separately from the
+visible message. A public file URL remains a link. An unsupported binary file is not
+silently treated as an attached document. Render must report unavailable requested
+attachments before sending and retain the draft.
 
 In this fork, the ChatGPT transport enables live web search. The Grok transport also
 passes web-search tools through its provider gateway. Provider availability and page
-access still apply; this is not a guarantee that every URL or image can be opened.
-The Claude, OpenRouter, and custom OpenAI-compatible transports disable web search.
-All providers have `fusion_fetch_docs`, but it reads only the allowlisted Autodesk
-Fusion API HTML pages—it cannot read an arbitrary product listing or motor PDF.
-STEVE's own image attachment flow can supply pixels to image-capable models; the
-current Render bridge submission does not carry binary image attachments.
-
-The handoff instructions distinguish external references from Fusion canvases and
-require STEVE to identify inaccessible references instead of treating an empty Fusion
-document as proof that Render supplied no context. Those bridge-side instructions
-load on the next STEVE start; updating source alone does not restart an active chat.
+access still apply. The Claude, OpenRouter, and custom OpenAI-compatible transports
+disable web search. All providers have `fusion_fetch_docs`, but it reads only
+allowlisted Autodesk Fusion API HTML pages. It cannot read arbitrary product listings
+or motor PDFs. Never include session cookies or API credentials in reference text.
 
 ## Live Design Chat feed (capabilities.chatEvents)
 

@@ -125,6 +125,39 @@ class ImageControllerTests(unittest.TestCase):
         self.controller.close()
         self.controller._worker.join(2)
 
+    def test_render_adapter_sends_pixels_and_hides_delivery_context(self):
+        from types import SimpleNamespace as Obj
+        from unittest.mock import Mock
+        from tests.test_clipboard_bridge import load_entry
+        from steve.external_bridge import _submission, BridgeCommand
+        from steve.controller import CONTEXT_PREFIX
+        prompt = 'Build this mount. https://example.com/reference'
+        submission = _submission({'prompt': prompt, 'references': [
+            {'data_url': PNG, 'name': 'Canvas', 'text_content': 'A round flange'}]}, 'render-image')
+        document = Obj(isValid=True)
+        storage = Obj(settings={'autoSave': True}, saving=lambda: False, track=Mock())
+        bridge = Obj(storage=storage, drain_commands=lambda: (BridgeCommand(1, 'submit', submission),),
+                     requeue_commands=Mock(), feed=Obj(fail=Mock()))
+        fusion = Obj(document=document, message_context=lambda action: {
+            'document_id': 'pinned', 'task_key': 'private', 'targetPinned': True})
+        load_entry()._dispatch_bridge_commands(bridge, self.controller, fusion)
+        eventually(lambda: self.controller.turn_id is not None)
+        parts = next(params['input'] for method, params in self.client.calls if method == 'turn/start')
+        self.assertEqual(parts[0]['text'], prompt)
+        self.assertEqual(parts[1], {'type': 'image', 'url': PNG})
+        context = json.loads(parts[2]['text'][len(CONTEXT_PREFIX):])
+        self.assertEqual(context['renderReferences'][0]['text_content'], 'A round flange')
+        self.assertNotIn('data_url', context['renderReferences'][0])
+        self.assertTrue(context['renderDelivery']['managedSave'])
+        self.assertEqual(context['document_id'], 'pinned')
+        self.assertNotIn('task_key', context)
+        message = self.controller.snapshot()['messages'][0]
+        self.assertEqual(message['text'], prompt)
+        self.assertNotIn('renderDelivery', json.dumps(message))
+        image_id = message['images'][0]['id']
+        self.assertEqual(self.controller.image_assets([image_id])[image_id], PNG)
+        storage.track.assert_called_once_with(submission, document)
+
     def test_image_only_send_and_steering_use_native_input_and_separate_previews(self):
         self.controller.dispatch("send", {"images": [{"url": PNG, "name": "Bracket"}]})
         eventually(lambda: self.controller.turn_id is not None)

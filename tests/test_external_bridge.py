@@ -1,4 +1,5 @@
 """Exercise the external bridge through its loopback HTTP boundary."""
+import base64
 from hashlib import sha256
 import hmac
 import http.client
@@ -14,7 +15,8 @@ from types import SimpleNamespace as Obj
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "addin/STEVE"))
-from steve.external_bridge import ExternalBridge, BridgeError, MAX_QUEUE_SIZE, Submission, submission_message
+from steve.external_bridge import ExternalBridge, BridgeError, MAX_QUEUE_SIZE, Submission, submission_message, submission_context, MAX_BODY_BYTES, MAX_SUBMISSION_BODY_BYTES
+from steve.images import MAX_IMAGES, MAX_IMAGE_BYTES
 
 
 ORIGIN = "http://render-studio.test"
@@ -40,6 +42,67 @@ class BridgeHTTPTests(unittest.TestCase):
         commands = self.bridge.drain_commands()
         self.assertEqual(len(commands), 1)
         self.assertEqual(commands[0].reply_target, ('chatgpt', 'linked'))
+
+    def test_signed_images_are_validated_authenticated_and_idempotent(self):
+        secret = self.pair()
+        image = {'url': 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\nreference').decode(),
+                 'name': 'Canvas reference'}
+        body = {'prompt': 'Build from this', 'images': [image]}
+        self.assertEqual(self.submit(secret, body)[0], 202)
+        self.assertEqual(self.submit(secret, body)[0], 200)
+        self.assertEqual(self.submit(secret, {**body, 'images': [{**image, 'name': 'Changed'}]})[0], 409)
+        command, = self.bridge.drain_commands()
+        self.assertEqual(command.submission.images[0]['url'], image['url'])
+        self.assertEqual(command.submission.images[0]['name'], image['name'])
+        tampered = {**body, 'images': []}
+        self.assertEqual(self.request('/v1/submissions', 'POST', tampered, self.auth(secret, body))[0], 401)
+        for images in ([image] * (MAX_IMAGES + 1), {}, [None], [{'url': 'https://example.com/ref.png'}],
+                       [{'url': 'data:image/png;base64,broken'}], [{'url': 'data:image/png;base64,YmFk'}],
+                       [{'url': 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\n' + b'x' * MAX_IMAGE_BYTES).decode()}]):
+            with self.subTest(kind=str(images)[:70]):
+                status, _, result = self.submit(secret, {'prompt': 'Build', 'images': images}, request_id=uuid4().hex)
+                self.assertEqual((status, result['error']['code']), (400, 'invalid_request'))
+        self.assertEqual(self.submit(secret, {'prompt': 'Build', 'files': [{'name': 'part.pdf'}]}, request_id='files')[0], 400)
+        self.assertEqual(self.bridge.drain_commands(), ())
+
+    def test_structured_references_preserve_text_and_forward_pixels(self):
+        secret = self.pair()
+        image = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\nreference').decode()
+        references = [{'type': 'file', 'filename': 'n' * 512, 'text_content': 'Hole diameter 20 mm',
+                       'description': 'd' * 2000, 'role': 'reference', 'public_url': 'https://example.com/notes.pdf'},
+                      {'type': 'canvas', 'label': 'Side', 'url': 'https://example.com/side.png', 'data_url': image}]
+        self.assertEqual(self.submit(secret, {'prompt': 'Use these', 'references': references})[0], 202)
+        submission = self.bridge.drain_commands()[0].submission
+        self.assertEqual(submission.images[0]['url'], image)
+        context = submission_context(submission, {'document_id': 'pinned'})
+        self.assertEqual(context['renderReferences'][0]['text_content'], 'Hole diameter 20 mm')
+        self.assertEqual(len(context['renderReferences'][0]['filename']), 512)
+        self.assertEqual(len(context['renderReferences'][0]['description']), 2000)
+        self.assertEqual(context['renderReferences'][0]['role'], 'reference')
+        self.assertEqual(context['renderReferences'][0]['public_url'], 'https://example.com/notes.pdf')
+        self.assertNotIn('data_url', context['renderReferences'][1])
+        self.assertEqual(submission_message(submission), 'Use these')
+        for refs in ([{}] * 65, [{'label': 'x' * 257}], [{'url': 'file:///tmp/private'}],
+                     [{'text_content': 'x' * 100001}], [{'text_content': 'x' * 50001}] * 2,
+                     [{'data_url': 'data:application/pdf;base64,JVBERg=='}], [{'text_content': {}}]):
+            with self.subTest(refs=str(refs)[:60]):
+                self.assertEqual(self.submit(secret, {'prompt': 'Use these', 'references': refs}, request_id=uuid4().hex)[0], 400)
+        self.assertEqual(self.submit(secret, {'prompt': 'Use these', 'images': [{'url': image}] * 4,
+                                              'references': references}, request_id='combined-limit')[0], 400)
+
+    def test_maximum_images_fit_and_body_limits_remain_bounded(self):
+        secret = self.pair()
+        image = {'url': 'data:image/png;base64,' + base64.b64encode(
+            b'\x89PNG\r\n\x1a\n' + b'x' * (MAX_IMAGE_BYTES - 8)).decode(), 'name': 'Reference'}
+        self.assertEqual(self.submit(secret, {'prompt': '\U0001f600' * 32000, 'images': [image] * MAX_IMAGES})[0], 202)
+        self.assertEqual(len(self.bridge.drain_commands()[0].submission.images), MAX_IMAGES)
+        # Header-only requests exercise rejection before any large body is read.
+        for path, limit in [('/v1/submissions', MAX_SUBMISSION_BODY_BYTES), ('/v1/ping', MAX_BODY_BYTES)]:
+            connection = http.client.HTTPConnection('127.0.0.1', self.bridge.port, timeout=3)
+            connection.request('POST', path, headers={'Origin': ORIGIN, 'Content-Type': 'application/json',
+                                                      'Content-Length': str(limit + 1)})
+            self.assertEqual(connection.getresponse().status, 413)
+            connection.close()
 
     def test_activity_contract_auth_validation_cors_and_no_model_work(self):
         payload = {'renderUserId': 'alice', 'after': 0}
@@ -185,7 +248,7 @@ class BridgeHTTPTests(unittest.TestCase):
             "busy": False,
             "ready": False,
             "pairingId": None,
-            "capabilities": {"authPing": True, "submitPrompt": True, "replyToRequest": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "projectBinding": True, "livePreview": False, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
+            "capabilities": {"authPing": True, "submitPrompt": True, "referenceImages": True, "referenceMetadata": True, "replyToRequest": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "projectBinding": True, "livePreview": False, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
             "queueDepth": 0,
         })
         self.assertNotIn("secret", json.dumps(result).lower())
@@ -455,42 +518,63 @@ class MainThreadAdapterTests(unittest.TestCase):
         entry._publish({})
         self.assertEqual(entry._app.fireCustomEvent.call_count,2)
 
-    def test_submission_message_defaults_to_current_folder_and_preserves_optional_target(self):
-        current = Submission("one", "Make a bracket.", None, None, "Motor Mount")
-        self.assertIn("Use the current Fusion Data Panel project and folder.", submission_message(current))
-        self.assertIn("Requested design name: Motor Mount", submission_message(current))
-        selected = Submission("two", "Make a bracket.", "project-1", "folder-2", None)
-        framed = submission_message(selected)
-        self.assertIn("explicitly selected Autodesk destination", framed)
-        self.assertIn("Autodesk project ID: project-1", framed)
-        self.assertIn("Autodesk folder ID: folder-2", framed)
-        self.assertIn("silently falling back", framed)
+    def test_submission_message_preserves_original_prompt_only(self):
+        prompt = '  Build the mount.\nMotor: https://example.com/motor?size=34&revision=2\n'
+        for managed in (False, True):
+            submission = Submission('links', prompt, 'project', 'folder', 'Mount')
+            self.assertEqual(submission_message(submission, managed_save=managed), prompt)
 
-    def test_handoff_preserves_plain_reference_urls_without_claiming_canvas_transfer(self):
-        prompt = 'Build the mount.\nMotor: https://example.com/motor?size=34&revision=2\nImage: https://example.com/side.png'
-        framed = submission_message(Submission('links', prompt, None, None, None), managed_save=True)
-        self.assertTrue(framed.endswith(prompt))
-        self.assertIn('not automatically attached Fusion canvases or image pixels', framed)
-        self.assertIn('If your provider cannot open a link', framed)
-        self.assertIn('Work only in the pinned document', framed)
+    def test_delivery_context_is_hidden_and_keeps_target_and_save_constraints(self):
+        from steve.controller import message_input, conversation_messages, CONTEXT_PREFIX
+        submission = Submission('one', 'Build https://example.com/ref', 'project', 'folder', 'Mount')
+        original = {'task_key': 'private', 'document_id': 'pinned', 'targetPinned': True}
+        for managed in (False, True):
+            context = submission_context(submission, original, managed)
+            self.assertNotIn('renderDelivery', original)
+            self.assertEqual(context['document_id'], 'pinned')
+            delivery = context['renderDelivery']
+            self.assertEqual((delivery['projectId'], delivery['folderId'], delivery['designName']),
+                             ('project', 'folder', 'Mount'))
+            self.assertIn('Work only in the pinned document', delivery['constraints'])
+            self.assertIn('Do not call save, saveAs, move, or close' if managed else 'silently falling back',
+                          delivery['constraints'])
+            parts = message_input(submission_message(submission), context)
+            self.assertTrue(parts[-1]['text'].startswith(CONTEXT_PREFIX))
+            self.assertNotIn('task_key', parts[-1]['text'])
+            restored = conversation_messages({'turns': [{'items': [
+                {'type': 'userMessage', 'id': 'user', 'content': parts}]}]})
+            self.assertEqual(restored[0]['text'], submission.prompt)
 
     def test_adapter_dispatches_one_command_with_fusion_context_and_keeps_the_rest(self):
         from tests.test_clipboard_bridge import load_entry
         entry = load_entry()
-        submissions = [Obj(kind="submit", submission=Submission("one", "First", None, None, "First Design")),
+        submissions = [Obj(kind="submit", submission=Submission("one", "First", None, None, "First Design", images=({"url": "pixels"},))),
                        Obj(kind="submit", submission=Submission("two", "Second", None, None, None))]
         bridge = Obj(drain_commands=Mock(return_value=tuple(submissions)), requeue_commands=Mock())
-        capture = Mock()
+        capture = Mock(return_value={"document_id": "pinned"})
         controller = Obj(state={"busy": False}, dispatch=Mock(return_value=True))
         entry._dispatch_bridge_commands(bridge, controller, Obj(message_context=capture))
         sent = controller.dispatch.call_args.args[1]["text"]
-        self.assertIn("Use the current Fusion Data Panel project and folder.", sent)
-        self.assertIn("Requested design name: First Design", sent)
-        self.assertTrue(sent.endswith("\nFirst"))
+        self.assertEqual(sent, "First")
+        self.assertEqual(controller.dispatch.call_args.args[1]["images"], [{"url": "pixels"}])
         self.assertTrue(callable(controller.dispatch.call_args.kwargs["capture_context"]))
         controller.dispatch.call_args.kwargs["capture_context"]("send")
         capture.assert_called_once_with("send")
         bridge.requeue_commands.assert_called_once_with((submissions[1],))
+
+    def test_adapter_preserves_queued_submission_from_before_image_hotload(self):
+        from tests.test_clipboard_bridge import load_entry
+        legacy = Obj(request_id='old', prompt='Queued before hotload', project_id=None,
+                     folder_id=None, design_name=None)
+        command = Obj(kind='submit', submission=legacy)
+        bridge = Obj(drain_commands=lambda: (command,), requeue_commands=Mock())
+        controller = Obj(state={'busy': False}, dispatch=Mock(return_value=True))
+        load_entry()._dispatch_bridge_commands(bridge, controller, Obj(message_context=lambda action: {}))
+        payload = controller.dispatch.call_args.args[1]
+        self.assertEqual(payload['text'], legacy.prompt)
+        self.assertEqual(payload['images'], [])
+        context = controller.dispatch.call_args.kwargs['capture_context']('send')
+        self.assertFalse(context['renderDelivery']['managedSave'])
 
     def test_adapter_does_not_dispatch_while_controller_is_busy(self):
         from tests.test_clipboard_bridge import load_entry
@@ -519,7 +603,7 @@ class MainThreadAdapterTests(unittest.TestCase):
         self.assertEqual(controller.dispatch.call_args.args[1]['bridgeReplyTarget'], ('chatgpt', 'linked'))
         capture = controller.dispatch.call_args.kwargs['capture_context']
         bridge.feed.read = Mock(return_value={'snapshot': {'targetDocument': {'id': 'document'}}})
-        bridge.storage = Obj(track=Mock())
+        bridge.storage = Obj(track=Mock(), settings={"autoSave": True})
         document = Obj(isValid=True)
         fusion.document_id = 'document'
         fusion.document = document

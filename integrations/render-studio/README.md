@@ -8,7 +8,7 @@ picker). It is an integration bundle, not the entire Render Studio application.
 
 Copy `steve-connector.js`, `steve-chat-feed.js`, `steve-design-chat.js`, `steve-result-open.js`,
 `steve-connector.css`, and `steve-setup.css` into Render's `frontend/cad/`.
-Load both stylesheets. Also deploy `steve-live-preview.js`, `steve-prompt-text.js`,
+Load both stylesheets. Also deploy `steve-live-preview.js`, `steve-prompt-text.js`, `steve-reference-attachments.js`,
 `steve-activity.js`, `steve-activity-ui.js`, `steve-activity.css`, `steve-project-binding.js`, and `steve-mark.svg`.
 Keep these modules together; the activity UI loads its stylesheet from `/cad/`.
 Copy [`examples/render-storage-settings.js`](../../examples/render-storage-settings.js)
@@ -354,21 +354,21 @@ this is not a claim that all host application checks pass.
 ## Live mesh and automatic project chat recovery
 
 Copy the updated connector, chat wrapper/feed, result opener, and the new
-`steve-prompt-text.js` and `steve-live-preview.js` modules into Render's `frontend/cad`.
+`steve-prompt-text.js`, `steve-reference-attachments.js`, and `steve-live-preview.js` modules into Render's `frontend/cad`.
 Their adjacent tests are standalone Node tests. `live-preview-host.patch` records the
 minimal host changes against the deployed Render version; review it and merge the
 relevant hunks when your host differs. Preserve existing host imports, history-sync
 hooks and setup controls. Do not replace whole host files.
 
-Use one identical `steve-design-chat.js?v=20261008-steve-auth-ping1` import URL in the
+Use one identical `steve-design-chat.js?v=20261008-clean-message1` import URL in the
 application's static import, dynamic STEVE loader and Design Chat renderer. Bump the
 outer app/render-agent script URLs too so browsers load the new dependencies.
 
 ```js
 import { configureSteveLivePreview }
-  from '../cad/steve-design-chat.js?v=20261008-steve-auth-ping1';
-import { serializeStevePrompt }
-  from '../cad/steve-prompt-text.js?v=20261008-steve-integration3';
+  from '../cad/steve-design-chat.js?v=20261008-clean-message1';
+import { prepareSteveSubmission }
+  from '../cad/steve-prompt-text.js?v=20261008-clean-message1';
 
 configureSteveLivePreview({
   THREE, scene,
@@ -378,13 +378,14 @@ configureSteveLivePreview({
 
 // In the STEVE submit branch, capture context before awaiting the connector.
 const owner = { userId: String(currentUser?.id || ''), projectId: String(projectId || '') };
-const stevePrompt = serializeStevePrompt({
+const submission = await prepareSteveSubmission({
   prompt, references: preparedReferences || composer.getReferences(),
   images: preparedImages || promptImages || [], origin: window.location.origin,
-});
+  projectId: owner.projectId,
+}, { fetchSameOrigin: rawFetch });
 const integration = await getSteveIntegration();
 await integration.setActive(true);
-await integration.submitCurrent({ owner, prompt: stevePrompt });
+await integration.submitCurrent({ owner, ...submission });
 ```
 
 `mountSteveReplyRecovery({host, getOwner})` now automatically requests the latest
@@ -417,10 +418,12 @@ A paired Fusion server does not prove this browser has its matching key. Refresh
 installing the new scripts. Cloud Autodesk integration is still used for the saved-file
 library/import; the live mesh itself comes directly from the local Fusion bridge.
 
-Reference serialization sends plain URLs and available text, not Render-only reference
-chips. Local/protected images are identified as needing a direct attachment. It does
-not transfer image pixels into STEVE or create a Fusion canvas. See the bridge guide
-for provider-specific web access limitations.
+Reference preparation converts linked items to plain public URLs and attaches selected
+PNG, JPEG, or WebP pixels through STEVE’s native image input. Canvas images attach as
+visual references without inserting geometry into the pinned document. Available
+document text travels separately from the visible user message. Unsupported or
+unavailable selected files retain the draft and report an attachment error. See the
+bridge guide for supported sizes and provider-specific web access limitations.
 
 Connection polling uses signed `POST /v1/ping` when `capabilities.authPing` is true.
 This validates the stored key without submitting modeling work. Transient authentication
@@ -457,3 +460,9 @@ without waiting for another geometry revision.
 Use `direct-chat-host.patch` for the Render Agent chat host. A saved STEVE request selects its mirrored conversation even when another generation engine is selected. The chat sends directly and hides the Send-as-is controls.
 
 Forward `packet.replyToRequestId` through the host callback to `integration.submitCurrent({ owner, prompt, replyToRequestId })`. For notification replies, use the notification record's original user, project, and request ID. A targeted reply never claims a different project. New first submissions associate the unbound bridge automatically. Keep every import of `steve-design-chat.js` on the same version URL so its live state is shared.
+
+## Clean-message host update
+
+Apply the narrow [host patch](clean-reference-host.patch) to an up-to-date Render checkout, preserving unrelated edits. Both initial generation and Design Chat await `prepareSteveSubmission`. Supply the captured project ID and the authenticated same-origin `rawFetch` adapter. External image fetches omit credentials and reject redirects. Keep the shared STEVE import URLs identical and refresh the outer app cache version.
+
+Verified on 2026-10-08 with 149 focused tests on render-mac, 110 portable integration tests, and 118 native tests. The running Fusion bridge advertised both reference capabilities after hotload. An isolated browser check confirmed plain text, plain links, and image payloads without sending a modeling command. Broad feature-map checks remain unverified due to existing cache-marker failures and missing mapped files.

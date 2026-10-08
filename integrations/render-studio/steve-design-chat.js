@@ -196,8 +196,9 @@ export class SteveDesignChat {
     return Promise.all(this.records(owner).filter(record => !isSteveChatComplete(record.snapshot) && !record.rejected)
       .map(record => this.watch(record)));
   }
-  async submit(integration, { owner, prompt, replyToRequestId, requestId = globalThis.crypto.randomUUID() }) {
+  async submit(integration, { owner, prompt, references = [], replyToRequestId, requestId = globalThis.crypto.randomUUID() }) {
     owner = { ...owner };
+    references = references.map(reference => ({ ...reference }));
     if (replyToRequestId && !this.records(owner).some(item => item.requestId === replyToRequestId && !item.rejected)) {
       throw new Error("This STEVE reply does not belong to the current project conversation.");
     }
@@ -209,7 +210,7 @@ export class SteveDesignChat {
     this.write(record);
     if (record.persistenceWarning) throw new Error("Cannot save the STEVE request ID. Free browser storage before sending.");
     try {
-      const result = await integration.submitCurrent({ prompt, requestId, bindingRevision, ...(replyToRequestId ? { replyToRequestId } : {}), owner: { userId: record.userId, projectId: record.projectId } });
+      const result = await integration.submitCurrent({ prompt, ...(references.length ? { references } : {}), requestId, bindingRevision, ...(replyToRequestId ? { replyToRequestId } : {}), owner: { userId: record.userId, projectId: record.projectId } });
       void this.watch(record, integration.connector);
       return result;
     } catch (error) {

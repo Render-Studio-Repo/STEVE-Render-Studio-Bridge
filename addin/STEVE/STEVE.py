@@ -14,7 +14,7 @@ from .steve.transport import data_home
 from .steve.upgrade import migrate_data
 from .steve.app_update import launch_live_update
 from .steve.update_transaction import write_json
-from .steve.external_bridge import ExternalBridge, submission_message
+from .steve.external_bridge import ExternalBridge, submission_message, submission_context
 from .steve.render_storage import RenderStorage
 from .steve.render_preview import RenderPreview
 
@@ -165,9 +165,11 @@ def _dispatch_bridge_commands(bridge, controller, fusion_tools):
                     context = fusion_tools.message_context(action)
                 if getattr(bridge, "storage", None):
                     bridge.storage.track(command.submission, fusion_tools.document)
-                return context
+                return submission_context(command.submission, context, managed_save=bool(
+                    getattr(bridge, "storage", None) and bridge.storage.settings["autoSave"]))
             try:
-                accepted = controller.dispatch("send", {"text": submission_message(command.submission, managed_save=bool(getattr(bridge, "storage", None) and bridge.storage.settings["autoSave"])),
+                accepted = controller.dispatch("send", {"text": submission_message(command.submission),
+                                                       "images": list(getattr(command.submission, "images", ())),
                                                        "bridgeRequestId": command.submission.request_id,
                                                        "bridgeReplyTarget": getattr(command, 'reply_target', None)},
                                                capture_context=capture)

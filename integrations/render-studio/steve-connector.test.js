@@ -328,3 +328,36 @@ test("public ready status cannot verify an invalid stored key; capability-gated 
   await connector.poll(); assert.equal(probes, 3);
   connector.deactivate();
 });
+
+test("reference pixels and hidden text are included in the signed submission body", async () => {
+  const references = [{ type: "image", name: "Canvas", data_url: "data:image/png;base64,iVBORw0KGgo=" },
+    { type: "document", text_content: "Shaft diameter: 8 mm" }];
+  let sent;
+  const connector = new SteveConnector({ cryptoApi: webcrypto, schedule: () => 1, cancelSchedule() {},
+    secretStore: { read: async () => "test-secret" },
+    fetchFn: async (url, options) => { sent = options; return response(202, { accepted: true }); } });
+  connector.state = "ready";
+  connector.status = { capabilities: { referenceImages: true, referenceMetadata: true } };
+  connector.prepareSubmission = async () => "revision-original";
+  await connector.submit({ prompt: "  Match this.  ", references, renderUserId: "alice", renderProjectId: "original", requestId: "request-images" });
+  assert.equal(JSON.parse(sent.body).prompt, "  Match this.  ");
+  assert.deepEqual(JSON.parse(sent.body).references, references);
+  const expected = await signSteveSubmission({ secret: "test-secret", body: sent.body, requestId: "request-images",
+    timestamp: sent.headers["X-Steve-Timestamp"], nonce: sent.headers["X-Steve-Nonce"], cryptoApi: webcrypto });
+  assert.equal(sent.headers["X-Steve-Signature"], expected);
+});
+
+test("missing native reference capabilities fail explicitly instead of dropping selected files", async () => {
+  let sends = 0;
+  const connector = new SteveConnector({ cryptoApi: webcrypto, schedule: () => 1, cancelSchedule() {},
+    secretStore: { read: async () => "test-secret" }, fetchFn: async () => { sends++; return response(202, {}); } });
+  connector.state = "ready";
+  connector.prepareSubmission = async () => "revision-original";
+  const packet = { prompt: "Use this", references: [{ type: "image", data_url: "data:image/png;base64,iVBORw0KGgo=" }],
+    renderUserId: "alice", renderProjectId: "original" };
+  connector.status = { capabilities: {} };
+  await assert.rejects(connector.submit(packet), /selected references/);
+  connector.status = { capabilities: { referenceMetadata: true } };
+  await assert.rejects(connector.submit(packet), /image attachments/);
+  assert.equal(sends, 0);
+});

@@ -1,0 +1,98 @@
+--- a/frontend/components/render-agent-design-chat.test.js
++++ b/frontend/components/render-agent-design-chat.test.js
+@@ -1,3 +1,4 @@
++import { prepareSteveSubmission } from "../cad/steve-prompt-text.js";
+ import { SteveDesignChat, mountSteveSavedResult } from "../cad/steve-design-chat.js";
+ import test from "node:test";
+ import assert from "node:assert/strict";
+@@ -274,7 +275,7 @@
+   const quoteHelper = topFunction("stripOuterPromptQuotes", readFileSync(new URL("./prompt-ref.js", import.meta.url), "utf8"));
+   const start = source.indexOf("  let designChatThread = null;");
+   const end = source.indexOf("  function mountPromptDesignChat()", start);
+-  vm.runInContext(`${helpers}\n${quoteHelper}\nfunction renderAgentKeyFields() { return {}; }\n${source.slice(start, end)}\nglobalThis.chat = { renderDesignChat, sendDesignChat, loadDesignChat, appendHeyAiSummary, settleDesignGeneration: (host, detail) => settleDesignGeneration(host, detail), queue: () => designChatGenerationQueue, seed(messages) { designChatThread = { id: 'thread-a', messages }; designChatThreadProjectId = 'project-a'; }, reset() { designChatThread = null; designChatThreadProjectId = ''; } };`, context);
++  vm.runInContext(`${helpers}\n${quoteHelper}\nfunction renderAgentKeyFields() { return {}; }\n${source.slice(start, end)}\nglobalThis.chat = { attach(items) { designChatAttachments = items; }, renderDesignChat, sendDesignChat, loadDesignChat, appendHeyAiSummary, settleDesignGeneration: (host, detail) => settleDesignGeneration(host, detail), queue: () => designChatGenerationQueue, seed(messages) { designChatThread = { id: 'thread-a', messages }; designChatThreadProjectId = 'project-a'; }, reset() { designChatThread = null; designChatThreadProjectId = ''; } };`, context);
+   context.chat.seed(messages);
+   return { ...elements, send, newButton, submit, prompt, host, chat: context.chat, storage, setProject(value) { projectId = value; }, setUser(value) { userId = value; }, setCadEngine(value) { activeCadEngine = value; }, setGoal(value) { setDesignGoal(projectId, userId, value); } };
+ }
+@@ -1153,3 +1154,18 @@
+   assert.equal(packets[0]?.projectId, "project-a");
+   steveChat.dispose();
+ });
++
++
++test("unsupported STEVE uploads preserve the draft and selected files on retry", async () => {
++  const packets = [];
++  const h = harness([], async () => ({}), { cadEngine: "steve",
++    onSendSteveDesignMessage: async packet => { packets.push(packet); return prepareSteveSubmission(packet); } });
++  h.chat.attach([{ id: "upload-step", name: "model.step", media_type: "application/step" }]);
++  for (let attempt = 0; attempt < 2; attempt++) {
++    const result = await h.chat.sendDesignChat(h.host, "Use this model.");
++    assert.equal(result.ok, false);
++    assert.equal(h.input.value, "Use this model.");
++    assert.match(h.status.textContent, /model.step/);
++    assert.equal(packets[attempt].references[0].filename, "model.step");
++  }
++});
+--- a/frontend/components/render-agent.js
++++ b/frontend/components/render-agent.js
+@@ -2858,7 +2858,8 @@
+     // composer images live in getPromptImages(), while picker/drop uploads live
+     // in designChatAttachments. Sending only the latter made Canvas appear as
+     // metadata while its actual pixels were silently omitted from the chat.
+-    let outgoingAttachments = designChatConversationAttachments(options.queuedTurn?.attachments || designChatAttachments);
++    const selectedAttachments = cloneDesignGenerationFiles(options.queuedTurn?.attachments || designChatAttachments);
++    let outgoingAttachments = designChatConversationAttachments(selectedAttachments);
+     if (requestsModelInspection(raw)) {
+       outgoingAttachments = await withViewportInspectionEvidence(raw, outgoingAttachments, getViewportInspectionImage);
+     }
+@@ -2878,13 +2879,17 @@
+           targetMode: "new",
+           selectedFilename: context.models?.selectedFilename || "",
+         });
+-        const result = await onSendSteveDesignMessage({ ...packet, ...steveRoute });
++        const references = [...packet.references, ...outgoingAttachments
++          .filter(item => !item.data_url && !item.text && !String(item.media_type || "").startsWith("image/"))
++          .map(item => ({ ...item, type: "document", filename: item.name || item.filename }))];
++        const result = await onSendSteveDesignMessage({ ...packet, references, ...steveRoute });
+         if (result?.ok === false) throw new Error(result.error || "STEVE did not accept the message.");
+         finishSubmittedDesignChatDraft(host, raw, true, draftStorageKey, projectId);
+         setDesignChatStatus(host, "Sent to STEVE. Fusion replies and progress will mirror in this conversation.");
+         return { ok: true, steve: true, ...result };
+       } catch (error) {
+         if (String(getProjectId?.() || "") === projectId) {
++          designChatAttachments = [...new Map([...selectedAttachments, ...designChatAttachments].map(item => [item.id, item])).values()];
+           finishSubmittedDesignChatDraft(host, raw, false, draftStorageKey, projectId);
+           setDesignChatStatus(host, error?.message || "Could not send this message to STEVE.", true);
+         }
+--- a/frontend/studio/app.js
++++ b/frontend/studio/app.js
+@@ -54827,10 +54827,10 @@
+     }
+     try {
+       const owner = { userId: String(currentUser?.id || ""), projectId: String(projectId || "") };
+-      const steveSubmission = prepareSteveSubmission({ prompt,
++      const steveSubmission = await prepareSteveSubmission({ prompt,
+         references: preparedReferences || composer.getReferences(),
+-        images: preparedImages || promptImages || [], origin: window.location.origin,
+-      });
++        images: preparedImages || promptImages || [], origin: window.location.origin, projectId: owner.projectId,
++      }, { fetchSameOrigin: rawFetch });
+       const integration = await getSteveIntegration();
+       await integration.setActive(true);
+       const result = await integration.submitCurrent({ owner, ...steveSubmission });
+@@ -57355,12 +57355,13 @@
+         currentUserId: currentUser?.id || "",
+       });
+       if (conflict) return { ok: false, error: conflict };
+-      const submission = prepareSteveSubmission({
++      const submission = await prepareSteveSubmission({
+         prompt: packet.prompt,
+         references: packet.references || [],
+         images: packet.images || [],
+         origin: window.location.origin,
+-      });
++        projectId: owner.projectId,
++      }, { fetchSameOrigin: rawFetch });
+       const integration = await getSteveIntegration();
+       await integration.setActive(true);
+       const result = await integration.submitCurrent({ owner, ...submission, replyToRequestId: packet.replyToRequestId });

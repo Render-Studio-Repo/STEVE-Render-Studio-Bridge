@@ -1,3 +1,4 @@
+import { validateSteveImages } from "./steve-reference-attachments.js?v=20261008-clean-message1";
 import { steveProjectBinding, bindingError } from './steve-project-binding.js?v=20261008-completion-placement1';
 import { watchSteveChat } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 const DEFAULT_BASE_URL = "http://127.0.0.1:38173";
@@ -517,9 +518,9 @@ export class SteveConnector {
     return steveProjectBinding.assertOwner(owner, bindingRevision);
   }
 
-  async submit({ prompt, projectId, folderId, renderProjectId, renderUserId, bindingRevision, replyToRequestId, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
-    const cleanPrompt = String(prompt || "").trim();
-    if (!cleanPrompt) throw new Error("Enter a CAD prompt before sending to STEVE.");
+  async submit({ prompt, references = [], projectId, folderId, renderProjectId, renderUserId, bindingRevision, replyToRequestId, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
+    const cleanPrompt = String(prompt ?? "");
+    if (!cleanPrompt.trim()) throw new Error("Enter a CAD prompt before sending to STEVE.");
     await this.refreshSecret();
     if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
     if (this.state !== "ready" && !(this.state === "busy" && replyToRequestId)) throw new Error(STEVE_STATE_VIEW[this.state].recovery);
@@ -527,6 +528,18 @@ export class SteveConnector {
     const revision = await this.prepareSubmission({ userId: renderUserId, projectId: renderProjectId }, bindingRevision, replyToRequestId);
     const payload = { prompt: cleanPrompt, renderProjectId: String(renderProjectId), renderUserId: String(renderUserId),
       bindingRevision: revision };
+    if (!Array.isArray(references) || references.length > 64) throw new Error("Too many selected references.");
+    const attached = references.filter(reference => reference?.data_url);
+    validateSteveImages(attached.map(reference => ({ url: reference.data_url, name: reference.name || reference.label })));
+    if (references.length) {
+      if (this.status?.capabilities?.referenceMetadata !== true && this.status?.capabilities?.structuredReferences !== true) {
+        throw new Error("Update STEVE in Fusion to receive selected references.");
+      }
+      if (attached.length && this.status?.capabilities?.referenceImages !== true) {
+        throw new Error("Update STEVE in Fusion to receive image attachments.");
+      }
+      payload.references = references;
+    }
     if (replyToRequestId) {
       if (this.status?.capabilities?.replyToRequest !== true) throw new Error("Update STEVE in Fusion to resume this conversation safely.");
       payload.replyToRequestId = String(replyToRequestId);
@@ -778,10 +791,11 @@ export function mountSteveConnector({
       return connector.snapshot();
     },
     prepareSubmission: (owner, replyToRequestId) => connector.prepareSubmission(owner, undefined, replyToRequestId),
-    async submitCurrent({ prompt = getPrompt(), requestId, owner, bindingRevision, replyToRequestId } = {}) {
+    async submitCurrent({ prompt = getPrompt(), references = [], requestId, owner, bindingRevision, replyToRequestId } = {}) {
       steveProjectBinding.assertOwner(owner, bindingRevision);
       const result = await connector.submit({
         prompt,
+        ...(references.length ? { references } : {}),
         requestId,
         renderProjectId: owner?.projectId,
         renderUserId: owner?.userId,
