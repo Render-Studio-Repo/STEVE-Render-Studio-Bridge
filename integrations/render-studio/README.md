@@ -267,15 +267,15 @@ minimal host changes against the deployed Render version; review it and merge th
 relevant hunks when your host differs. Preserve existing host imports, history-sync
 hooks and setup controls. Do not replace whole host files.
 
-Use one identical `steve-design-chat.js?v=20261008-steve-integration2` import URL in the
+Use one identical `steve-design-chat.js?v=20261008-steve-integration3` import URL in the
 application's static import, dynamic STEVE loader and Design Chat renderer. Bump the
 outer app/render-agent script URLs too so browsers load the new dependencies.
 
 ```js
 import { configureSteveLivePreview }
-  from '../cad/steve-design-chat.js?v=20261008-steve-integration2';
+  from '../cad/steve-design-chat.js?v=20261008-steve-integration3';
 import { serializeStevePrompt }
-  from '../cad/steve-prompt-text.js?v=20261008-steve-integration2';
+  from '../cad/steve-prompt-text.js?v=20261008-steve-integration3';
 
 configureSteveLivePreview({
   THREE, scene,

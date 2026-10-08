@@ -31,7 +31,7 @@ export class SteveLivePreview {
   observe(record, { authenticated = false } = {}) {
     if (!sameOwner(record, this.getOwner())) return;
     if (this.record?.requestId === record.requestId && sameOwner(this.record, record)) {
-      if (authenticated) this.blocked = false;
+      if (authenticated === true) this.blocked = false;
       return;
     }
     if (sameOwner(this.record, record) && this.record.createdAt > record.createdAt) return;

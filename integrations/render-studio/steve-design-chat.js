@@ -1,6 +1,6 @@
-import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-steve-integration2";
+import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-steve-integration3";
 import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-steve-open2";
-import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-integration2";
+import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-integration3";
 import { isSteveChatComplete } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 
 const PREFIX = "render3d:steveDesignChat:v1:";
@@ -158,10 +158,10 @@ export class SteveDesignChat {
       const record = previous || this.remember(owner, requestId, snapshot.messages?.find(message => message.role === "user")?.text || "");
       if (!previous) record.resultOpen = { intent: "manual", state: "manual", message: "" };
       record.snapshot = snapshot;
-      this.onPreviewRecord(record, { authenticated: true });
       record.connection = "connected";
       record.error = "";
       this.write(record);
+      this.onPreviewRecord(record, { authenticated: true });
       if (!isSteveChatComplete(snapshot)) void this.watch(record, connector, { allowAutoOpen: false });
       return record;
     }).catch(error => {

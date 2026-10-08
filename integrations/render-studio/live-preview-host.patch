@@ -2,8 +2,8 @@
 +++ b/frontend/studio/app.js
 @@ -1,4 +1,5 @@
 -import { configureSteveResultOpening } from "../cad/steve-design-chat.js?v=20261008-steve-owner1";
-+import { serializeStevePrompt } from "../cad/steve-prompt-text.js?v=20261008-steve-integration2";
-+import { configureSteveLivePreview, configureSteveResultOpening } from "../cad/steve-design-chat.js?v=20261008-steve-integration2";
++import { serializeStevePrompt } from "../cad/steve-prompt-text.js?v=20261008-steve-integration3";
++import { configureSteveLivePreview, configureSteveResultOpening } from "../cad/steve-design-chat.js?v=20261008-steve-integration3";
  import { mountDesignGoal, getDesignGoal, setDesignGoal } from "../components/design-goal.js?v=20261007-concise-goal-3";
  import { DEFAULT_AI_MODEL, ASTRA_MODEL_OPTIONS } from "../components/ai-model-defaults.js?v=astra-default1&astraoffice=20260917-1&gpt61sol=20261001-1";
  import { loadModelReasoning, modelReasoningOptions, modelReasoningOptionsHTML, modelReasoningRequestField, storeModelReasoning } from "../components/model-reasoning.js?v=20261001-1";
@@ -12,7 +12,7 @@
  import { openStoreListingPopup } from "../marketplace/store-listing-popup.js?v=20260909-storepop1";
  import { createWorkspaceManagementUI } from "../workspace/workspace-management.js?v=20260826-mgmt-dash&leakfix54";
 -import { createRenderAgent } from "../components/render-agent.js?v=20261008-steve-open2&steve-guidance=20261008-1";
-+import { createRenderAgent } from "../components/render-agent.js?v=20261008-steve-open2&steve-guidance=20261008-1&steve-integration=20261008-2";
++import { createRenderAgent } from "../components/render-agent.js?v=20261008-steve-open2&steve-guidance=20261008-1&steve-integration=20261008-3";
  import { createCollab } from "../social/collab.js?v=20260907-xr-avatar2-20260916-vrsharemesh1&editctx=20260915-1&editscale=20260915-1&cvinvite=20260916-1";
  import { createRibbon } from "./ribbon.js?v=20260928-top-toolbar-trim1";
  import {
@@ -32,7 +32,7 @@
  function getSteveIntegration() {
    if (!steveIntegrationPromise) {
 -    steveIntegrationPromise = import("../cad/steve-design-chat.js?v=20261008-steve-owner1").then((mod) => mod.mountSteveDesignChat({
-+    steveIntegrationPromise = import("../cad/steve-design-chat.js?v=20261008-steve-integration2").then((mod) => mod.mountSteveDesignChat({
++    steveIntegrationPromise = import("../cad/steve-design-chat.js?v=20261008-steve-integration3").then((mod) => mod.mountSteveDesignChat({
        getPrompt: () => composer?.getPromptText?.() || "",
        getFusionStatus: () => api("/api/autodesk/status"),
        connectFusion: () => document.getElementById("btn-fusion-connect")?.click(),
@@ -56,7 +56,7 @@
 +++ b/frontend/components/render-agent.js
 @@ -1,4 +1,4 @@
 -import { steveDesignChat, mountSteveReplyRecovery, mountSteveSavedResult } from "../cad/steve-design-chat.js?v=20261008-steve-mirror1";
-+import { steveDesignChat, mountSteveReplyRecovery, mountSteveSavedResult } from "../cad/steve-design-chat.js?v=20261008-steve-integration2";
++import { steveDesignChat, mountSteveReplyRecovery, mountSteveSavedResult } from "../cad/steve-design-chat.js?v=20261008-steve-integration3";
  import { mountDesignGoal, getDesignGoal } from "./design-goal.js?v=20261007-concise-goal-3";
  import { mountDesignReview } from "./design-review.js?v=20261008-design-review-3";
  import { prepareDesignReferenceContext } from "./design-reference-context.js?v=20261007-concise-goal-1";
@@ -67,7 +67,7 @@
    <script type="module" src="/viewport/local-terminal-boot.js?v=termbridge1&vrrobot=20260927-2"></script>
    <script type="module"
 -                              src="/studio/app.js?v=20260908-20261007-shared-measurements-2&mcp-goal-review-1&inspection-findings=20261008-1&20260909-viewtabs&20260909-vp-load&wiresplit=20260916-1&wiring-ready=20261008-1&cansplit=20260916-1&vpwhite1&substate1&substate2&claude-tabs=20260928-2&share-x-fps1&video-ready-close=20261006-1&sharexedit1=20261006-1&editautosave=20261006-4&spaceplay=20261006-2&clipui1&clipkeys1&xtab1&vidlayout1&vidzoom1&vidmodel1&vidjob1&sharexcap1-xsharepct1&xsharebtn1&sharexfix=20260916-1&sharex=20260916-1&xcap1&xcap2&xcap3&xcap4&clipgen1&subscription-usage=20261008-3&inline-view-controls=20261008-2&rotate-button=20261008-1&usage-pill=20261008-1&goal-row=20261008-1&20260915-measure1&20260914-ttrans1&20260914-ttrans2&esctran1&20260914-agentpop1&20260914-agentlock1&20260914-agentbtn1&20260916-voicewake1&voicesample=20260916-1&hey-ai-conversation=20261007-1&hey-ai-transcript=20261008-1&20260916-vrwalk1&20260915-pickhud1&20260915-pickesc1&20260914-vcube1&spatial-intent=20261008-1&prompt-transfer=20261008-1&engine-badge=20261008-2&steve-light=20261008-1&steve-storage=20261008-1&steve-native-picker=20261008-3&header-debug=20261008-1&steve-chat=20261008-3&steve-open=20261008-2&steve-links=20261008-3"></script>
-+                              src="/studio/app.js?v=20260908-20261007-shared-measurements-2&mcp-goal-review-1&inspection-findings=20261008-1&20260909-viewtabs&20260909-vp-load&wiresplit=20260916-1&wiring-ready=20261008-1&cansplit=20260916-1&vpwhite1&substate1&substate2&claude-tabs=20260928-2&share-x-fps1&video-ready-close=20261006-1&sharexedit1=20261006-1&editautosave=20261006-4&spaceplay=20261006-2&clipui1&clipkeys1&xtab1&vidlayout1&vidzoom1&vidmodel1&vidjob1&sharexcap1-xsharepct1&xsharebtn1&sharexfix=20260916-1&sharex=20260916-1&xcap1&xcap2&xcap3&xcap4&clipgen1&subscription-usage=20261008-3&inline-view-controls=20261008-2&rotate-button=20261008-1&usage-pill=20261008-1&goal-row=20261008-1&20260915-measure1&20260914-ttrans1&20260914-ttrans2&esctran1&20260914-agentpop1&20260914-agentlock1&20260914-agentbtn1&20260916-voicewake1&voicesample=20260916-1&hey-ai-conversation=20261007-1&hey-ai-transcript=20261008-1&20260916-vrwalk1&20260915-pickhud1&20260915-pickesc1&20260914-vcube1&spatial-intent=20261008-1&prompt-transfer=20261008-1&engine-badge=20261008-2&steve-light=20261008-1&steve-storage=20261008-1&steve-native-picker=20261008-3&header-debug=20261008-1&steve-chat=20261008-3&steve-open=20261008-2&steve-links=20261008-3&steve-integration=20261008-2"></script>
++                              src="/studio/app.js?v=20260908-20261007-shared-measurements-2&mcp-goal-review-1&inspection-findings=20261008-1&20260909-viewtabs&20260909-vp-load&wiresplit=20260916-1&wiring-ready=20261008-1&cansplit=20260916-1&vpwhite1&substate1&substate2&claude-tabs=20260928-2&share-x-fps1&video-ready-close=20261006-1&sharexedit1=20261006-1&editautosave=20261006-4&spaceplay=20261006-2&clipui1&clipkeys1&xtab1&vidlayout1&vidzoom1&vidmodel1&vidjob1&sharexcap1-xsharepct1&xsharebtn1&sharexfix=20260916-1&sharex=20260916-1&xcap1&xcap2&xcap3&xcap4&clipgen1&subscription-usage=20261008-3&inline-view-controls=20261008-2&rotate-button=20261008-1&usage-pill=20261008-1&goal-row=20261008-1&20260915-measure1&20260914-ttrans1&20260914-ttrans2&esctran1&20260914-agentpop1&20260914-agentlock1&20260914-agentbtn1&20260916-voicewake1&voicesample=20260916-1&hey-ai-conversation=20261007-1&hey-ai-transcript=20261008-1&20260916-vrwalk1&20260915-pickhud1&20260915-pickesc1&20260914-vcube1&spatial-intent=20261008-1&prompt-transfer=20261008-1&engine-badge=20261008-2&steve-light=20261008-1&steve-storage=20261008-1&steve-native-picker=20261008-3&header-debug=20261008-1&steve-chat=20261008-3&steve-open=20261008-2&steve-links=20261008-3&steve-integration=20261008-3"></script>
    <script type="module" src="/studio/prompt-compare-copy.js?v=20261007-1&prompt-transfer=20261008-1"></script>
    <script type="module" src="/components/prompt-transfer-design-chat.js?v=20261008-prompt-transfer1"></script>
    <script type="module" src="/sandbox/studio-window.js?v=20260923-draw-recordings1&singlevoice1&vrrobot=20260927-2"></script>
