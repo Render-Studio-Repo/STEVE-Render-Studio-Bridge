@@ -6,12 +6,14 @@ from hashlib import sha256
 import hmac
 from http.server import BaseHTTPRequestHandler
 import json
+from pathlib import Path
 import secrets
 import threading
 import time
 from urllib.parse import urlsplit
 
 from .loopback_http import ThreadingLoopbackHTTPServer
+from .render_feed import RenderFeed
 
 
 PROTOCOL_VERSION = 1
@@ -106,13 +108,47 @@ def _submission(payload, request_id):
     )
 
 
+def normalize_render_origin(value):
+    """Accept a single exact web origin, never credentials, paths or wildcards."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 2048:
+        raise ValueError("Enter a Render address such as https://render3d.app.")
+    value = value.strip()
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        raise ValueError("Invalid Render address or port.") from None
+    if (parts.scheme not in {"https", "http"} or not parts.hostname or
+            parts.username is not None or parts.password is not None or
+            parts.path not in {"", "/"} or parts.query or parts.fragment or
+            any(c.isspace() for c in value) or "*" in value or "\\" in value or
+            any(ord(c) < 32 for c in value)):
+        raise ValueError("Use only the exact http:// or https:// address and optional port; no path, credentials or wildcard.")
+    host = parts.hostname.encode("idna").decode("ascii")
+    if ":" in host:
+        host = f"[{host}]"
+    suffix = f":{port}" if port is not None and port != (443 if parts.scheme == "https" else 80) else ""
+    return f"{parts.scheme}://{host}{suffix}"
+
+
 class ExternalBridge:
     """Owns bridge state, authentication, idempotency, and the command queue."""
 
-    def __init__(self, wake_main_thread, readiness=None, origins=(), port=BRIDGE_PORT, clock=time.time):
+    def __init__(self, wake_main_thread, readiness=None, origins=(), port=BRIDGE_PORT, clock=time.time, config_path=None):
         self._wake_main_thread = wake_main_thread
         self._readiness = readiness or (lambda: {})
-        self._origins = frozenset(PRODUCTION_ORIGINS | frozenset(origins))
+        self._config_path = Path(config_path) if config_path else None
+        self._render_origin = "https://render3d.app"
+        self._config_error = ""
+        if self._config_path and self._config_path.exists():
+            try:
+                self._render_origin = normalize_render_origin(json.loads(self._config_path.read_text())["renderOrigin"])
+            except (OSError, ValueError, KeyError, TypeError):
+                self._config_error = "Saved Render address could not be loaded; using https://render3d.app."
+        self._origins = frozenset({self._render_origin} | frozenset(origins))
+        self._events = deque(maxlen=100)
+        self._last_contact = None
+        self.feed = RenderFeed()
         self._port = port
         self._clock = clock
         self._lock = threading.Lock()
@@ -159,6 +195,7 @@ class ExternalBridge:
             self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.STOPPED)
             self._pending_secret = self._secret = None
             self._commands.clear()
+            self.feed.clear()
         if server:
             server.shutdown()
             server.server_close()
@@ -180,9 +217,53 @@ class ExternalBridge:
                 "busy": bool(readiness.get("busy", False)),
                 "ready": state.phase is ConnectionPhase.PAIRED and bool(readiness.get("providerReady", False)),
                 "pairingId": state.pairing_id,
-                "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False},
+                "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True},
                 "queueDepth": len(self._commands),
             }
+
+    def configure(self, value):
+        origin = normalize_render_origin(value)
+        busy = self._readiness().get("busy")
+        with self._lock:
+            if origin == self._render_origin:
+                return
+            if self._commands or busy:
+                raise ValueError("Wait for the current Fusion operation to finish before changing the Render address.")
+            if self._config_path:
+                from .update_transaction import write_json
+                self._config_path.parent.mkdir(parents=True, exist_ok=True)
+                write_json(self._config_path, {"renderOrigin": origin})
+            self._render_origin = origin
+            self._origins = frozenset({origin})
+            self._config_error = ""
+            self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.UNPAIRED)
+            self._pending_secret = self._secret = None
+            self._nonces.clear()
+            self._requests.clear()
+            self._last_contact = None
+            self.feed.clear()
+            self._events.append({"time": self._clock(), "event": "address_changed"})
+        self._wake_main_thread()
+
+    def connection_info(self):
+        result = self.status()
+        with self._lock:
+            age = None if self._last_contact is None else max(0, int(self._clock() - self._last_contact))
+            return {**result, "renderOrigin": self._render_origin,
+                    "lastContactSeconds": age, "browserActive": age is not None and age < 90,
+                    "configError": self._config_error}
+
+    def diagnostics(self):
+        info = self.connection_info()
+        info.pop("pairingId", None)
+        with self._lock:
+            events = list(self._events)
+        return json.dumps({"connection": info, "events": events,
+                           "note": "Connection events only; no prompts, credentials or pairing secrets. Activity is not an authenticated heartbeat."}, indent=2)
+
+    def _record_event(self, event):
+        with self._lock:
+            self._events.append({"time": self._clock(), "event": event})
 
     def request_pairing(self):
         wake = False
@@ -198,6 +279,7 @@ class ExternalBridge:
             self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.PAIRING_PENDING, pairing_id)
             wake = True
         if wake:
+            self._record_event("pairing_requested")
             self._wake_main_thread()
         return pairing_id
 
@@ -232,7 +314,9 @@ class ExternalBridge:
             self._nonces.clear()
             self._requests.clear()
             self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.PAIRED)
-            return secret
+        self._record_event("pairing_completed")
+        self._wake_main_thread()
+        return secret
 
     def drain_commands(self):
         with self._lock:
@@ -284,6 +368,7 @@ class ExternalBridge:
                 return False
             if len(self._commands) >= MAX_QUEUE_SIZE:
                 raise BridgeError(429, "queue_full", "STEVE's submission queue is full.")
+            self.feed.accept(submission.request_id, submission.prompt)
             self._commands.append(BridgeCommand(PROTOCOL_VERSION, "submit", submission))
             self._requests[submission.request_id] = body_hash
             while len(self._requests) > IDEMPOTENCY_CACHE_SIZE:
@@ -302,8 +387,10 @@ class ExternalBridge:
                 raise BridgeError(403, "invalid_host", "Host is not allowed.")
             if origin not in self._origins:
                 raise BridgeError(403, "invalid_origin", "Origin is not allowed.")
+            with self._lock:
+                self._last_contact = self._clock()
             if handler.command == "OPTIONS":
-                if handler.path not in {"/v1/status", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions"}:
+                if handler.path not in {"/v1/status", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions", "/v1/events"}:
                     raise BridgeError(404, "not_found", "Route not found.")
                 self._send(handler, 204, None, origin)
                 return
@@ -330,6 +417,16 @@ class ExternalBridge:
                 if set(payload) != {"pairingId"}:
                     raise BridgeError(400, "invalid_request", "Invalid pairing completion.")
                 result, status = {"version": PROTOCOL_VERSION, "secret": self.complete_pairing(payload["pairingId"])}, 200
+            elif handler.command == "POST" and handler.path == "/v1/events":
+                self._authenticate(handler, body)
+                payload = self._json(body)
+                if set(payload) != {"requestId", "after"} or type(payload.get("after")) is not int or payload["after"] < 0:
+                    raise BridgeError(400, "invalid_request", "Expected requestId and nonnegative integer after.")
+                request_id = _text(payload.get("requestId"), "requestId", MAX_REQUEST_ID_CHARS, required=True)
+                try:
+                    result, status = self.feed.read(request_id, payload["after"]), 200
+                except KeyError:
+                    raise BridgeError(404, "request_not_found", "Request is unknown or its events have expired.")
             elif handler.command == "POST" and handler.path == "/v1/submissions":
                 request_id, body_hash = self._authenticate(handler, body)
                 submission = _submission(self._json(body), request_id)
@@ -339,8 +436,10 @@ class ExternalBridge:
                 raise BridgeError(404, "not_found", "Route not found.")
             self._send(handler, status, result, origin)
         except BridgeError as error:
+            self._record_event(error.code)
             self._send(handler, error.status, {"error": {"code": error.code, "message": str(error)}}, handler.headers.get("Origin"))
         except Exception:
+            self._record_event("internal_error")
             self._send(handler, 500, {"error": {"code": "internal_error", "message": "The bridge could not process the request."}}, handler.headers.get("Origin"))
 
     @staticmethod

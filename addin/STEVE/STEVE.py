@@ -48,7 +48,9 @@ def _log_error():
 
 def _publish(state):
     global _pending_state, _event_pending
-    bridge_status = _external_bridge.status() if _external_bridge else None
+    if _external_bridge:
+        _external_bridge.feed.observe(state)
+    bridge_status = _external_bridge.connection_info() if _external_bridge else None
     with _pending_lock:
         _pending_state = {**state, "externalBridge": bridge_status}
         if _event_pending or not _running:
@@ -135,8 +137,14 @@ def _dispatch_bridge_commands(bridge, controller, fusion_tools):
         return
     for index, command in enumerate(commands):
         if command.kind == "submit":
-            accepted = controller.dispatch("send", {"text": submission_message(command.submission)},
-                                           capture_context=fusion_tools.message_context)
+            try:
+                accepted = controller.dispatch("send", {"text": submission_message(command.submission),
+                                                       "bridgeRequestId": command.submission.request_id},
+                                               capture_context=fusion_tools.message_context)
+            except Exception as error:
+                bridge.feed.fail(command.submission.request_id, error)
+                bridge.requeue_commands(commands[index + 1:])
+                raise
             if accepted is False:
                 bridge.requeue_commands(commands[index:])
             else:
@@ -230,7 +238,13 @@ class HTMLMessage(adsk.core.HTMLEventHandler):
             elif event.action == "saveConcept":
                 event.returnData = json.dumps({"ok": True, **_controller.save_concept(payload.get("id"))})
             elif event.action == "externalBridgeStatus":
-                event.returnData = json.dumps({"ok": True, **_external_bridge.status()})
+                event.returnData = json.dumps({"ok": True, **_external_bridge.connection_info()})
+            elif event.action == "externalBridgeConfigure":
+                _external_bridge.configure(payload.get("renderOrigin"))
+                _publish(_controller.snapshot())
+                event.returnData = json.dumps({"ok": True, **_external_bridge.connection_info()})
+            elif event.action == "externalBridgeDiagnostics":
+                event.returnData = json.dumps({"ok": True, "text": _external_bridge.diagnostics()})
             elif event.action in {"externalBridgeApprove", "externalBridgeDeny"}:
                 pairing_id = payload.get("pairingId")
                 if not isinstance(pairing_id, str):
@@ -326,7 +340,7 @@ def run(context):
         _bind(ui.workspaceActivated, WorkspaceActivated(), _handlers)
         _fusion_tools = FusionTools(_app)
         _controller = Controller(_publish, fusion_tools=_fusion_tools)
-        _external_bridge = ExternalBridge(lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID), readiness=_bridge_readiness)
+        _external_bridge = ExternalBridge(lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID), readiness=_bridge_readiness, config_path=data_home() / "render-bridge.json")
         try:
             _external_bridge.start()
         except OSError as error:

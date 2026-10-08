@@ -332,6 +332,8 @@ class Controller:
             end = len(messages) if self._transcript_end is None else min(self._transcript_end, len(messages))
             start = max(0, end - 200)
             return {**copy.deepcopy({**self.state, 'messages': messages[start:end]}),
+                     'bridgeMessages': copy.deepcopy(messages[max(self.state.get('bridgeMessageStart', len(messages)), len(messages)-100):]) if self.state.get('bridgeRequestId') else [],
+                    'bridgeMessageOffset': max(0, len(messages)-100-self.state.get('bridgeMessageStart', len(messages))),
                     'messageOffset': start, 'olderMessagesCount': start,
                     'showingOlderMessages': self._transcript_end is not None,
                     'newerMessagesCount': len(messages) - end, "turnId": self.turn_id,
@@ -816,6 +818,9 @@ class Controller:
             self._refresh_account(refresh_token=bool(payload.get("refreshToken")),
                                   require_account=bool(payload.get("afterLogin")), refresh_models=bool(payload.get("refreshModels")))
         elif action == "send":
+            with self._lock:
+                self.state['bridgeRequestId'] = payload.get('bridgeRequestId')
+                self.state['bridgeMessageStart'] = len(self.state['messages'])
             self._send(str(payload.get("text", "")).strip(), payload.get("fusionContext"), payload.get("images"))
         elif action == "job":
             self._job_action(payload)

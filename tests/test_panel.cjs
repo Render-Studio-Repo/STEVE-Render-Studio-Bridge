@@ -154,6 +154,25 @@ assert.equal(vm.runInContext('selectedAction.action', context), 'updateSteve');
 assert.equal(elements.get('update-confirm').open, false);
 console.log('Update confirmation controls passed.');
 
+// Render pairing is independent of provider readiness and recent activity.
+for (const [info, expected] of [
+  [null, 'offline'],
+  [{phase:'pairing_pending'}, 'pending'],
+  [{phase:'paired',connected:true,browserActive:true,providerReady:true}, 'ready'],
+  [{phase:'paired',connected:true,browserActive:true,providerReady:false}, 'pending'],
+  [{phase:'paired',connected:true,browserActive:false,providerReady:true}, 'offline'],
+]) {
+  vm.runInContext(`state.externalBridge=${JSON.stringify(info)}`, context);
+  context.renderConnection();
+  assert.equal(elements.get('render-connection').dataset.status, expected);
+}
+elements.get('render-origin').value='https://draft.example';
+elements.get('render-origin').dataset.dirty='true';
+context.renderConnection();
+assert.equal(elements.get('render-origin').value,'https://draft.example');
+delete elements.get('render-origin').dataset.dirty;
+console.log('Render status checks passed: pairing, activity, provider readiness and draft preservation.');
+
 // The composer steers an active turn, keeps Stop available, and retains failed drafts.
 (async () => {
   context.Option = function(text, value) { return {text, value}; };

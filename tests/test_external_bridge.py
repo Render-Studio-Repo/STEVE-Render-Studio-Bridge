@@ -87,7 +87,7 @@ class BridgeHTTPTests(unittest.TestCase):
             "busy": False,
             "ready": False,
             "pairingId": None,
-            "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False},
+            "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True},
             "queueDepth": 0,
         })
         self.assertNotIn("secret", json.dumps(result).lower())
@@ -120,7 +120,7 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual(len(commands), 1)
         self.assertEqual(commands[0].submission.prompt, "Create a 20 mm bracket")
         self.assertEqual(commands[0].submission.folder_id, "folder-b")
-        self.assertEqual(self.wakes, 2)
+        self.assertEqual(self.wakes, 3)
 
     def test_bad_signature_expired_timestamp_and_nonce_replay_are_rejected(self):
         secret = self.pair()
@@ -184,6 +184,29 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual(status, 204)
         self.assertIn("X-Steve-Signature", headers["Access-Control-Allow-Headers"])
 
+    def test_chat_feed_requires_signature_and_scopes_results(self):
+        secret = self.pair()
+        self.submit(secret, {"prompt": "Create a bracket"})
+        payload = {"requestId": "request-1", "after": 0}
+        self.assertEqual(self.request("/v1/events", "POST", payload)[0], 401)
+        def event_request(payload, secret=secret):
+            body = json.dumps(payload, separators=(",", ":")).encode()
+            timestamp, nonce, request_id = str(int(time.time())), uuid4().hex, uuid4().hex
+            signed = f"POST\n/v1/events\n{timestamp}\n{nonce}\n{request_id}\n{sha256(body).hexdigest()}".encode()
+            headers = {"X-Steve-Timestamp":timestamp, "X-Steve-Nonce":nonce, "X-Request-Id":request_id,
+                       "X-Steve-Signature":hmac.new(secret.encode(),signed,sha256).hexdigest()}
+            return self.request("/v1/events", "POST", payload, headers)
+        status, _, result = event_request(payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(result['snapshot']['messages'][0]['text'], 'Create a bracket')
+        self.assertNotIn(secret, str(result))
+        self.assertEqual(event_request({"requestId":"other", "after":0})[0], 404)
+        self.assertEqual(event_request({"requestId":"request-1", "after":True})[0], 400)
+        self.assertEqual(self.request('/v1/events', 'OPTIONS')[0], 204)
+        self.bridge.drain_commands()
+        self.bridge.configure('http://localhost:5173')
+        self.assertEqual(event_request(payload)[0], 403)
+
     def test_close_is_clean_and_idempotent(self):
         self.bridge.close()
         self.bridge.close()
@@ -227,6 +250,56 @@ class MainThreadAdapterTests(unittest.TestCase):
         entry._dispatch_bridge_commands(bridge, controller, Obj(message_context=Mock()))
         controller.dispatch.assert_not_called()
         bridge.requeue_commands.assert_called_once_with(commands)
+
+
+
+class BridgeSettingsTests(unittest.TestCase):
+    def test_address_persists_and_revokes_old_pairing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'render-bridge.json'
+            bridge = ExternalBridge(lambda: None, config_path=config)
+            pairing = bridge.request_pairing()
+            bridge.approve_pairing(pairing)
+            secret = bridge.complete_pairing(pairing)
+            bridge.configure('https://staging.example:443/')
+            self.assertEqual(bridge.connection_info()['renderOrigin'], 'https://staging.example')
+            self.assertFalse(bridge.status()['connected'])
+            self.assertIsNone(bridge._secret)
+            self.assertEqual(bridge._origins, {'https://staging.example'})
+            self.assertNotIn(secret, bridge.diagnostics())
+            restored = ExternalBridge(lambda: None, config_path=config)
+            self.assertEqual(restored.connection_info()['renderOrigin'], 'https://staging.example')
+
+    def test_invalid_address_does_not_revoke_pairing(self):
+        bridge = ExternalBridge(lambda: None)
+        pairing = bridge.request_pairing()
+        bridge.approve_pairing(pairing)
+        bridge.complete_pairing(pairing)
+        for value in ['*', 'https://user:pass@example.com', 'https://example.com/path',
+                      'https://example.com?token=abc', 'file:' + '/' * 3 + 'tmp', 'https://*.example.com',
+                      'https://example.com:invalid', None]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                bridge.configure(value)
+            self.assertTrue(bridge.status()['connected'])
+
+    def test_activity_expires_without_discarding_pairing(self):
+        now = [1000]
+        bridge = ExternalBridge(lambda: None, clock=lambda: now[0])
+        pairing = bridge.request_pairing()
+        bridge.approve_pairing(pairing)
+        bridge.complete_pairing(pairing)
+        bridge._last_contact = now[0]
+        self.assertTrue(bridge.connection_info()['browserActive'])
+        now[0] += 91
+        self.assertFalse(bridge.connection_info()['browserActive'])
+        self.assertTrue(bridge.status()['connected'])
+
+    def test_busy_config_change_preserves_address(self):
+        bridge = ExternalBridge(lambda: None, readiness=lambda: {'busy': True})
+        with self.assertRaises(ValueError):
+            bridge.configure('http://localhost:5173')
+        self.assertEqual(bridge.connection_info()['renderOrigin'], 'https://render3d.app')
 
 
 if __name__ == "__main__":

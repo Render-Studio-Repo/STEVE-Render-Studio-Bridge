@@ -7,6 +7,19 @@
 > project/folder and a design name. This is an add-on integration for Render and
 > is not an official 10-X-eng release. See [bridge setup and security](docs/EXTERNAL_BRIDGE.md).
 
+## Install this Render bridge edition
+
+Start with [the copy-and-paste AI installation prompt](docs/INSTALL_WITH_AI.md).
+Use this fork's source and verified runtime for the Render integration; the upstream
+release downloads described below do not include this fork's bridge changes.
+
+This edition adds a clickable green/red/amber **Render** connection indicator, a saved
+Render instance address, a copyable connection debug log, and authenticated live chat
+updates for Render Design Chat. The feed includes assistant replies, tool activity,
+document waits, completion and errors. Render's website must wire in the
+[browser client](examples/render-design-chat-client.js) using the
+[Design Chat integration guide](docs/EXTERNAL_BRIDGE.md#live-design-chat-feed-capabilitieschatevents).
+
 ## Your engineering partner inside Autodesk Fusion
 
 **Describe what you want. Build it inside Autodesk Fusion.**

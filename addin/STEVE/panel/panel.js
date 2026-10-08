@@ -464,6 +464,23 @@ function render() {
   }
 }
 
+// A paired browser may be closed: keep pairing and recent activity distinct.
+function renderConnection(){
+  const info=state.externalBridge;
+  let label="Not connected",color="offline";
+  if(info?.phase==="pairing_pending" || info?.phase==="pairing_approved"){label="Waiting for approval";color="pending";}
+  else if(info?.connected){
+    label=info.browserActive?(info.providerReady?"Connected to Render Studio":"Paired · AI sign-in needed"):"Paired · browser inactive";
+    color=info.browserActive?(info.providerReady?"ready":"pending"):"offline";
+  }
+  $("render-connection").dataset.status=color;
+  $("render-connection").title=label+" — click for connection settings";
+  $("render-connection").setAttribute("aria-label",label);
+  $("render-status").textContent=label;
+  $("render-detail").textContent=info?.configError || (info?`${info.renderOrigin} · ${info.phase} · ${info.lastContactSeconds===null?"No browser activity yet":`Last browser activity ${info.lastContactSeconds}s ago`}. Activity indicates recent requests, not a live socket connection.`:"Local bridge unavailable. Restart STEVE and check Diagnostics.");
+  if(!$("render-origin").dataset.dirty)$("render-origin").value=info?.renderOrigin||"https://render3d.app";
+}
+
 function renderControls() {
   $("transcript-pages").hidden = !state.olderMessagesCount && !state.showingOlderMessages;
   $("transcript-older").hidden = !state.olderMessagesCount;
@@ -477,6 +494,7 @@ function renderControls() {
   const custom=local || openai;
   const signed=!!state.account && (!(local || claude || openai) || state.models.length>0);
   const hasMessages=state.messages.length>0 && signed;
+  renderConnection();
   const pairing=state.externalBridge;
   const pairingDialog=$("external-bridge-pairing");
   if(pairing?.phase==="pairing_pending" && !pairingDialog.open)pairingDialog.showModal();
@@ -661,7 +679,7 @@ function renderControls() {
 }
 
 // Settings is a short list of categories; each row opens its own page and Back returns to the list.
-const SETTINGS_PAGES={account:"AI provider",manufacturing:"Manufacturing",updates:"Updates",diagnostics:"Diagnostics"};
+const SETTINGS_PAGES={account:"AI provider",manufacturing:"Manufacturing",updates:"Updates",diagnostics:"Diagnostics",render:"Render Studio"};
 let settingsPage="root";
 function focusFirst(container) {
   if(!container?.querySelectorAll)return;
@@ -1066,3 +1084,34 @@ SteveGallery.init({bridge,openImage,
     state.models?.find(model=>model.id===state.model)?.supportsImages!==false,
   attach:file=>attachImages([file])
 });
+
+
+$("render-connection").onclick=()=>showSettings(true,true,"render");
+$("render-origin").oninput=()=>{$("render-origin").dataset.dirty="true";};
+$("render-save").onclick=async()=>{
+  $("render-save").disabled=true;
+  try{
+    const result=await bridge("externalBridgeConfigure",{renderOrigin:$("render-origin").value});
+    state.externalBridge=result;delete $("render-origin").dataset.dirty;
+    $("render-feedback").textContent="Address saved. Connect from Render if not already paired.";renderConnection();
+  }catch(error){$("render-feedback").textContent=error.message;}
+  finally{$("render-save").disabled=false;}
+};
+$("render-debug").onclick=async()=>{
+  try{
+    const result=await bridge("externalBridgeDiagnostics");
+    const field=$("render-debug-text");field.value=result.text;field.hidden=false;
+    let copied=false;
+    try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(result.text);copied=true;}}catch(error){}
+    if(!copied){field.focus();field.select();copied=document.execCommand("copy");}
+    $("render-feedback").textContent=copied?"Connection debug log copied.":"Select and copy the log below.";
+  }catch(error){$("render-feedback").textContent=error.message;}
+};
+let bridgeStatusPending=false;
+if(!preview)setInterval(async()=>{
+  if(bridgeStatusPending)return;
+  bridgeStatusPending=true;
+  try{state.externalBridge=await bridge("externalBridgeStatus");renderConnection();}
+  catch(error){state.externalBridge=null;renderConnection();}
+  finally{bridgeStatusPending=false;}
+},3000);

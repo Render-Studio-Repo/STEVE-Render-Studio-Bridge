@@ -6,17 +6,18 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'">
   <title>STEVE · Your engineering partner</title>
   <link rel="stylesheet" href="style.css?v=7">
-  <link rel="stylesheet" href="fusion.css?v=21">
+  <link rel="stylesheet" href="fusion.css?v=22">
   <script src="markdown.js?v=1" defer></script>
   <script src="images.js?v=3" defer></script>
   <script src="gallery.js?v=1" defer></script>
-  <script src="panel.js?v=38" defer></script>
+  <script src="panel.js?v=39" defer></script>
 </head>
 <body>
   <div id="app" class="app signed-out">
     <header class="topbar">
       <div class="brand"><img src="mark.svg" alt="" width="22" height="22"><span class="wordmark">STEVE</span></div>
       <div class="header-actions">
+        <button id="render-connection" class="render-connection" type="button" title="Render Studio connection settings" aria-label="Render Studio: not connected"><span class="render-dot" aria-hidden="true"></span><span>Render</span></button>
         <button id="gallery-button" class="icon-button gallery-toggle" title="Image gallery" aria-label="Image gallery" aria-expanded="false" aria-controls="gallery-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.5"/><path d="m4 17 5-5 4 4 3-3 5 5"/></svg><span aria-hidden="true">⌄</span></button>
         <button id="history-button" class="icon-button" title="Conversations" aria-label="Conversations" aria-expanded="false" aria-controls="history-panel"><svg viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 3 8M3 5v6h6M12 7v5l3 2"/></svg></button>
         <button id="new-chat" class="icon-button" title="New conversation" aria-label="New conversation"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
@@ -37,6 +38,7 @@
           <span class="eyebrow">STEVE</span>
           <button class="settings-row" type="button" data-page="updates"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg><span class="row-copy"><span class="row-title">Updates</span><span id="row-updates-value" class="row-value"></span></span><span id="updates-badge" class="settings-badge" hidden>Available</span><span class="chevron" aria-hidden="true"></span></button>
           <button class="settings-row" type="button" data-page="diagnostics"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span class="row-copy"><span class="row-title">Diagnostics</span><span id="row-diagnostics-value" class="row-value"></span></span><span class="chevron" aria-hidden="true"></span></button>
+          <button class="settings-row" type="button" data-page="render"><span class="row-copy"><span class="row-title">Render Studio</span><span class="row-value">Connection, address and debug log</span></span><span class="chevron" aria-hidden="true"></span></button>
           <p id="settings-version" class="settings-footer"></p>
         </nav>
         <div id="settings-account" class="settings-page" hidden>
@@ -81,6 +83,17 @@
             <p class="note">Updates independently of STEVE. After downloading, use Restart STEVE below to apply it and reopen your chat. Fusion stays open.</p>
           </div>
           <div class="menu-footer"><button id="restart-steve" class="secondary-button">Restart STEVE</button><span id="app-version"></span></div>
+        </div>
+        <div id="settings-render" class="settings-page" hidden>
+          <p id="render-status" role="status">Not connected</p>
+          <p id="render-detail" class="note"></p>
+          <label for="render-origin">Render instance address</label>
+          <input id="render-origin" type="url" spellcheck="false" placeholder="https://render3d.app">
+          <p class="note">Use the exact website address, including its port when needed. Saving a different address disconnects the old pairing. In the new Render instance, choose CAD → STEVE → Connect, then approve here.</p>
+          <div class="button-row"><button id="render-save" class="primary-button">Save address</button><button id="render-debug" class="secondary-button">Copy debug log</button></div>
+          <p id="render-feedback" class="note" role="status"></p>
+          <textarea id="render-debug-text" rows="8" readonly aria-label="Render connection debug log" hidden></textarea>
+          <p class="note">The connection log excludes prompts and credentials. Full STEVE logs are available under Diagnostics.</p>
         </div>
         <div id="settings-diagnostics" class="settings-page" hidden>
           <label class="switch-row" for="debug-logging"><span>Debug logging<small>Saves code, tool results and errors locally</small></span><input id="debug-logging" type="checkbox" role="switch" aria-describedby="debug-note"></label>

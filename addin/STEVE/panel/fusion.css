@@ -12,3 +12,11 @@ html, html body {
 #app { width: 100%; min-height: 0; background: var(--bg); color: var(--text); }
 #scroll-area, #welcome, #conversation { background: var(--bg); color: var(--text); }
 #app h1 { color: var(--text); }
+
+/* Render bridge status is independent of the AI-provider connection. */
+.render-connection{display:inline-flex;align-items:center;gap:5px;background:transparent;border:1px solid var(--border,#53605d);border-radius:12px;padding:3px 7px;color:inherit;font-size:11px;cursor:pointer;white-space:nowrap}
+.render-dot{width:8px;height:8px;border-radius:50%;background:#e57373;flex:none}
+.render-connection[data-status="ready"] .render-dot{background:#65d69a}
+.render-connection[data-status="pending"] .render-dot{background:#e9bd59}
+#render-origin,#render-debug-text{box-sizing:border-box;width:100%;margin:8px 0;padding:8px;color:inherit;background:transparent;border:1px solid #64736f;border-radius:6px}
+#render-debug-text{font:11px monospace;resize:vertical}
