@@ -387,7 +387,8 @@ def run(context):
                 if controller and controller.state.get('updateInstallReady'):
                     _publish(controller.snapshot())
         threading.Thread(target=update_wake, daemon=True, name='STEVE-Update-Idle').start()
-        _app.log(f"STEVE {VERSION} loaded. Open STEVE from the Quick Access toolbar or command search.")
+        _show_palette()
+        _app.log(f"STEVE {VERSION} loaded. STEVE opens automatically and is available in the Quick Access toolbar.")
     except Exception:
         _log_error()
         stop(context)
