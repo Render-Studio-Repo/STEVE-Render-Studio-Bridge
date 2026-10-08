@@ -78,6 +78,16 @@ class RenderPreview:
         self.cache_document = None
         self.last_export = -float('inf')
         self.revision = 0
+        self._connection_epoch = 0
+
+    def clear_connection(self):
+        with self.lock:
+            self._connection_epoch += 1
+            self.records.clear()
+            self.queue.clear()
+            # Detach the old cache; an in-flight exporter may still own it.
+            self.cache = {}
+            self.cache_document = None
 
     def request(self, request_id, after):
         self.feed.read(request_id, 0)  # Refuse arbitrary/unrelated IDs.
@@ -103,6 +113,7 @@ class RenderPreview:
         with self.lock:
             if not self.queue or self.clock() - self.last_export < 2:
                 return
+            epoch = self._connection_epoch
             pending = list(self.queue)
             self.queue.clear()
         self.last_export = self.clock()
@@ -117,12 +128,18 @@ class RenderPreview:
             try:
                 if not matches or state.get('bridgeSendQueued'):
                     raise ValueError('Open the linked STEVE conversation to preview its pinned document.')
-                if document is not self.cache_document:
-                    self.cache.clear()
-                    self.cache_document = document
-                snapshot = self.exporter(document, self.cache)
+                with self.lock:
+                    if epoch != self._connection_epoch:
+                        continue
+                    if document is not self.cache_document:
+                        self.cache.clear()
+                        self.cache_document = document
+                    cache = self.cache
+                snapshot = self.exporter(document, cache)
                 digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
                 with self.lock:
+                    if epoch != self._connection_epoch:
+                        continue
                     old = self.records.get(request_id, {})
                     if old.get('_digest') != digest:
                         self.revision += 1
@@ -131,6 +148,8 @@ class RenderPreview:
             except Exception as error:
                 with self.lock:
                     self.revision += 1
+                    if epoch != self._connection_epoch:
+                        continue
                     self.records[request_id] = {'requestId': request_id, 'revision': self.revision,
                                                'pending': False, 'error': str(error)[:500]}
             with self.lock:

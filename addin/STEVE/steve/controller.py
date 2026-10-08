@@ -342,6 +342,14 @@ class Controller:
                                     if self.state["busy"] and entry[:3] == (self.client, self.thread_id, self.turn_id)],
                     "canSteer": bool(self.turn_id and self.state["busy"] and not self._cancel)}
 
+    def bridge_admission(self):
+        """Serialize bridge ownership commits with native send/resume mutations.
+
+        Acquire before reading readiness and before the bridge lock. Dispatch
+        may publish while holding this reentrant lock (controller -> bridge).
+        """
+        return self._lock
+
     def bridge_readiness(self):
         """Return the small, sanitized readiness shape used by the local bridge."""
         with self._lock:

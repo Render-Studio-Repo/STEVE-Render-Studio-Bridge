@@ -356,7 +356,7 @@ def run(context):
         _bind(ui.workspaceActivated, WorkspaceActivated(), _handlers)
         _fusion_tools = FusionTools(_app)
         _controller = Controller(_publish, fusion_tools=_fusion_tools)
-        _external_bridge = ExternalBridge(lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID), readiness=_bridge_readiness, config_path=data_home() / "render-bridge.json")
+        _external_bridge = ExternalBridge(lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID), readiness=_bridge_readiness, admission=_controller.bridge_admission, config_path=data_home() / "render-bridge.json")
         _external_bridge.storage = RenderStorage(_app, _external_bridge.feed,
             data_home() / "render-storage.json", lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID))
         _external_bridge.preview = RenderPreview(_external_bridge.feed, lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID))

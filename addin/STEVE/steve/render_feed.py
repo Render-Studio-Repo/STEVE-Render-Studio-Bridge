@@ -4,6 +4,7 @@ from copy import deepcopy
 from hashlib import sha256
 import threading
 import json
+import os
 import time
 from uuid import uuid4
 from pathlib import Path
@@ -16,7 +17,7 @@ MAX_REQUESTS = 64
 
 
 class RenderFeed:
-    def __init__(self, path=None):
+    def __init__(self, path=None, render_origin=None):
         self._lock = threading.Lock()
         self._requests = OrderedDict()
         self._observed_signatures = {}
@@ -25,6 +26,7 @@ class RenderFeed:
         self._epoch = uuid4().hex
         self.path = Path(path) if path else None
         self._last_save = 0
+        self._origin = render_origin
         if self.path and self.path.exists():
             try:
                 if self.path.stat().st_size > 8_000_000:
@@ -32,6 +34,8 @@ class RenderFeed:
                 saved = json.loads(self.path.read_text())
                 if not isinstance(saved, dict) or not isinstance(saved.get('requests'), list):
                     raise ValueError('Invalid history')
+                if 'renderOrigin' in saved and saved['renderOrigin'] != self._origin:
+                    raise ValueError('History belongs to another Render origin')
                 for item in saved['requests'][-MAX_REQUESTS:]:
                     if not isinstance(item, dict) or not isinstance(item.get('requestId'), str) or not isinstance(item.get('messages'), list) or not item['messages'] or not all(isinstance(m, dict) and 'id' in m for m in item['messages']):
                         continue
@@ -63,7 +67,7 @@ class RenderFeed:
             self._epoch = uuid4().hex
             total -= len(json.dumps(item).encode()) + 2
 
-    def _persist(self, force=False):
+    def _persist(self, force=False, required=False):
         self._bound_history()
         if not self.path or not force and time.monotonic() - self._last_save < 1:
             return
@@ -71,18 +75,44 @@ class RenderFeed:
         while len(json.dumps(records).encode()) > MAX_HISTORY_BYTES and records:
             records.pop(0)
         try:
-            write_json(self.path, {'version': 1, 'requests': records})
+            if required:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+            packet = {'version': 1, 'requests': records}
+            if self._origin is not None:
+                packet['renderOrigin'] = self._origin
+            write_json(self.path, packet)
             self.path.chmod(0o600)
+            if required:
+                with self.path.open("rb") as stream:
+                    os.fsync(stream.fileno())
             self._last_save = time.monotonic()
         except OSError:
-            pass
+            if required:
+                raise
 
     def flush(self):
         with self._lock:
             self._persist(force=True)
 
-    def clear(self):
+    def ensure_origin(self, origin):
+        """Persist old-origin provenance before any configuration commit.
+
+        Legacy untagged history may be retained at startup, but must never
+        survive an origin change without this durable provenance barrier.
+        """
         with self._lock:
+            previous = self._origin
+            self._origin = origin
+            try:
+                self._persist(force=True, required=True)
+            except OSError:
+                self._origin = previous
+                raise
+
+    def clear(self, render_origin=None):
+        with self._lock:
+            if render_origin is not None:
+                self._origin = render_origin
             self._requests.clear()
             self._observed_signatures.clear()
             self._events.clear()
@@ -209,6 +239,26 @@ class RenderFeed:
                 item.update(deepcopy(status))
                 self._event(request_id, "status", status)
                 self._persist(force=True)
+
+    def project_state(self):
+        """Retained owner pairs and nonterminal work, including drained dispatches."""
+        with self._lock:
+            owners = set()
+            ambiguous = False
+            for item in self._requests.values():
+                if 'renderUserId' not in item and 'renderProjectId' not in item:
+                    continue  # Pure legacy, unowned history carries no association.
+                user, project = item.get('renderUserId'), item.get('renderProjectId')
+                if (not isinstance(user, str) or not user.strip() or len(user) > 256
+                        or not isinstance(project, str) or not project.strip() or len(project) > 256):
+                    ambiguous = True
+                else:
+                    owners.add((user, project))
+            if ambiguous:
+                owners.clear()  # Explicit selection is required for uncertain ownership.
+            busy = any(r.get('phase') not in {'completed', 'failed', 'stopped'}
+                       for r in self._requests.values())
+            return owners, busy
 
     def activity(self, user_id, after):
         """Full public snapshots for exactly one owner, across all projects.

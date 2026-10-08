@@ -1,5 +1,6 @@
 """Authenticated Render Studio bridge with no Fusion-thread access."""
 from collections import OrderedDict, deque
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
@@ -16,6 +17,7 @@ from urllib.parse import urlsplit
 
 from .loopback_http import ThreadingLoopbackHTTPServer
 from .render_feed import RenderFeed
+from .render_project import RenderProject, ProjectBinding
 
 
 PROTOCOL_VERSION = 1
@@ -55,6 +57,7 @@ class Submission:
     design_name: str | None
     render_project_id: str | None = None
     render_user_id: str | None = None
+    binding_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -110,7 +113,7 @@ def _text(value, field, maximum, required=False):
 
 
 def _submission(payload, request_id):
-    if not isinstance(payload, dict) or set(payload) - {"prompt", "projectId", "folderId", "designName", "renderProjectId", "renderUserId"}:
+    if not isinstance(payload, dict) or set(payload) - {"prompt", "projectId", "folderId", "designName", "renderProjectId", "renderUserId", "bindingRevision"}:
         raise BridgeError(400, "invalid_request", "Invalid submission fields.")
     if bool(payload.get('renderProjectId')) != bool(payload.get('renderUserId')):
         raise BridgeError(400, "invalid_request", "Render project and user IDs must be supplied together.")
@@ -122,6 +125,7 @@ def _submission(payload, request_id):
         design_name=_text(payload.get("designName"), "designName", 256),
         render_project_id=_text(payload.get('renderProjectId'), 'renderProjectId', 256),
         render_user_id=_text(payload.get('renderUserId'), 'renderUserId', 256),
+        binding_revision=_text(payload.get('bindingRevision'), 'bindingRevision', 128),
     )
 
 
@@ -151,9 +155,10 @@ def normalize_render_origin(value):
 class ExternalBridge:
     """Owns bridge state, authentication, idempotency, and the command queue."""
 
-    def __init__(self, wake_main_thread, readiness=None, origins=(), port=BRIDGE_PORT, clock=time.time, config_path=None):
+    def __init__(self, wake_main_thread, readiness=None, origins=(), port=BRIDGE_PORT, clock=time.time, config_path=None, admission=None):
         self._wake_main_thread = wake_main_thread
         self._readiness = readiness or (lambda: {})
+        self._admission = admission or nullcontext
         self._config_path = Path(config_path) if config_path else None
         self._render_origin = "https://render3d.app"
         self._config_error = ""
@@ -165,7 +170,12 @@ class ExternalBridge:
         self._origins = frozenset({self._render_origin} | frozenset(origins))
         self._events = deque(maxlen=100)
         self._last_contact = None
-        self.feed = RenderFeed(self._config_path.with_name('render-chat-history.json') if self._config_path else None)
+        self.feed = RenderFeed(self._config_path.with_name('render-chat-history.json') if self._config_path else None,
+                               render_origin=self._render_origin)
+        self.project = RenderProject(self._config_path.with_name("render-project.json") if self._config_path else None,
+                                     self._render_origin, self.feed.project_state()[0])
+        self._save_retries = {}
+        self._pending_retries = set()
         self.storage = None
         self.preview = None
         self._port = port
@@ -277,44 +287,127 @@ class ExternalBridge:
                 "busy": bool(readiness.get("busy", False)),
                 "ready": bool(self._secret) and bool(readiness.get("providerReady", False)),
                 "pairingId": state.pairing_id,
-                "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "livePreview": self.preview is not None, "storageSettings": self.storage is not None, "autoSave": self.storage is not None, "autoReadOnly": False},
+                "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "projectBinding": True, "livePreview": self.preview is not None, "storageSettings": self.storage is not None, "autoSave": self.storage is not None, "autoReadOnly": False},
                 "queueDepth": len(self._commands),
             }
 
+    def _project_available(self):
+        if self.project.error:
+            raise BridgeError(409, 'project_binding_changed', 'Saved project binding is unreadable; repair it before continuing.')
+
+    def _project_busy(self, native_busy=False):
+        if self._commands or native_busy or self.feed.project_state()[1]:
+            return True
+        if self.storage:
+            if self.storage.saving():
+                return True
+            for request_id in tuple(self._pending_retries):
+                try:
+                    if self.storage.result(request_id)['pending']:
+                        return True
+                except ValueError:
+                    # Storage never evicts pending operations, including claimed work.
+                    self._save_retries.pop(request_id, None)
+                self._pending_retries.discard(request_id)
+            # A claimed retry can transition from pending to saving during the poll.
+            if self.storage.saving():
+                return True
+        return False
+
+    def project_request(self, payload, handler=None):
+        action = payload.get('action')
+        if payload == {'action': 'get'}:
+            with self._lock:
+                self._check_authenticated(handler)
+                self._project_available()
+                return self._project_packet()
+        if action != 'bind' or set(payload) != {'action', 'renderUserId', 'renderProjectId', 'expectedRevision'}:
+            raise BridgeError(400, 'invalid_request', 'Invalid project action or fields.')
+        user = _text(payload['renderUserId'], 'renderUserId', 256, required=True)
+        project = _text(payload['renderProjectId'], 'renderProjectId', 256, required=True)
+        revision = _text(payload['expectedRevision'], 'expectedRevision', 128)
+        with self._admission():
+            native_busy = self._readiness().get('busy')
+            with self._lock:
+                self._check_authenticated(handler)
+                self._project_available()
+                current = self.project.binding
+                if revision != (current.revision if current else None):
+                    raise BridgeError(409, 'project_binding_changed', 'The project binding changed; refresh before binding.')
+                if current and (current.renderUserId, current.renderProjectId) == (user, project):
+                    return self._project_packet()
+                if self._project_busy(native_busy):
+                    raise BridgeError(409, 'project_busy', 'Wait for queued work, execution and saves to finish.')
+                self.project.replace(ProjectBinding.create(user, project))
+                return self._project_packet()
+
+    def _project_packet(self):
+        return {'version': 1, 'binding': self.project.binding.public() if self.project.binding else None}
+
+    def _require_project(self, user, project):
+        self._project_available()
+        binding = self.project.binding
+        if binding is None:
+            raise BridgeError(409, 'project_unbound', 'Bind a Render project first.')
+        if (user, project) != (binding.renderUserId, binding.renderProjectId):
+            raise BridgeError(409, 'project_mismatch', 'This request does not belong to the bound project.')
+
+    def _require_request(self, request_id):
+        snapshot = self.feed.read(request_id, 0)['snapshot']
+        self._require_project(snapshot.get('renderUserId'), snapshot.get('renderProjectId'))
+
     def configure(self, value):
         origin = normalize_render_origin(value)
-        busy = self._readiness().get("busy")
-        cleanup_error = None
-        with self._lock:
-            if origin == self._render_origin:
-                return
-            if self._commands or busy:
-                raise ValueError("Wait for the current Fusion operation to finish before changing the Render address.")
-            if self._config_path:
-                from .update_transaction import write_json
-                self._config_path.parent.mkdir(parents=True, exist_ok=True)
-                write_json(self._config_path, {"renderOrigin": origin})
+        with self._admission():
+            native_busy = self._readiness().get("busy")
+            cleanup_error = None
+            with self._lock:
+                if origin == self._render_origin:
+                    return
+                if self._project_busy(native_busy):
+                    raise ValueError("Wait for the current Fusion operation to finish before changing the Render address.")
+                if self.storage and self.storage.connection_busy():
+                    raise ValueError("Wait for storage operations before changing the Render address.")
+                old_binding, old_origin = self.project.binding, self.project.origin
+                self._project_available()
+                self.feed.ensure_origin(self._render_origin)
+                self.project.replace(None, origin)
                 try:
-                    self._config_path.with_name('render-pairing.json').unlink(missing_ok=True)
-                except OSError as error:
+                    if self._config_path:
+                        from .update_transaction import write_json
+                        self._config_path.parent.mkdir(parents=True, exist_ok=True)
+                        write_json(self._config_path, {"renderOrigin": origin})
+                        try:
+                            self._config_path.with_name('render-pairing.json').unlink(missing_ok=True)
+                        except OSError as error:
+                            try:
+                                write_json(self._config_path, {"renderOrigin": self._render_origin})
+                            except OSError:
+                                cleanup_error = error
+                            else:
+                                raise
+                except OSError:
                     try:
-                        write_json(self._config_path, {"renderOrigin": self._render_origin})
+                        self.project.replace(old_binding, old_origin)
                     except OSError:
-                        # Rollback failed: match the committed address and revoke
-                        # in memory too; the old on-disk key is origin-bound.
-                        cleanup_error = error
-                    else:
-                        raise
-            self._render_origin = origin
-            self._origins = frozenset({origin})
-            self._config_error = "Render address changed, but old pairing cleanup failed." if cleanup_error else ""
-            self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.UNPAIRED)
-            self._pending_secret = self._secret = None
-            self._nonces.clear()
-            self._requests.clear()
-            self._last_contact = None
-            self.feed.clear()
-            self._events.append({"time": self._clock(), "event": "address_changed"})
+                        self.project.error = True
+                    raise
+                self._render_origin = origin
+                self._origins = frozenset({origin})
+                self._config_error = "Render address changed, but old pairing cleanup failed." if cleanup_error else ""
+                self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.UNPAIRED)
+                self._pending_secret = self._secret = None
+                self._nonces.clear()
+                self._requests.clear()
+                self._last_contact = None
+                self.feed.clear(render_origin=origin)
+                if self.storage:
+                    self.storage.clear_connection()
+                if self.preview:
+                    self.preview.clear_connection()
+                self._save_retries.clear()
+                self._pending_retries.clear()
+                self._events.append({"time": self._clock(), "event": "address_changed"})
         self._wake_main_thread()
         if cleanup_error:
             raise cleanup_error
@@ -426,19 +519,38 @@ class ExternalBridge:
                 raise BridgeError(401, "invalid_signature", "The request signature is invalid.")
             if nonce in self._nonces:
                 raise BridgeError(409, "replay", "The request nonce was already used.")
+            handler._authenticated_secret = secret
             self._nonces[nonce] = timestamp_number
             while len(self._nonces) > NONCE_CACHE_SIZE:
                 self._nonces.popitem(last=False)
         return request_id, body_hash
 
-    def _enqueue(self, submission, body_hash):
+    def _check_authenticated(self, handler):
+        # Called inside the bridge lock at the actual read/mutation boundary.
+        if handler is not None and (getattr(handler, '_authenticated_secret', None) != self._secret
+                                    or handler.headers.get('Origin') not in self._origins):
+            raise BridgeError(401, 'pairing_changed', 'The paired connection changed; authenticate again.')
+
+    def _enqueue(self, submission, body_hash, handler=None):
         wake = False
         with self._lock:
+            self._check_authenticated(handler)
+            self._require_project(submission.render_user_id, submission.render_project_id)
+            if submission.binding_revision != self.project.binding.revision:
+                raise BridgeError(409, "project_binding_changed", "The submission binding changed; refresh before submitting.")
             prior = self._requests.get(submission.request_id)
             if prior:
                 if prior != body_hash:
                     raise BridgeError(409, "request_id_conflict", "The request ID was used with different content.")
                 return False
+            try:
+                self.feed.read(submission.request_id, 0)
+            except KeyError:
+                pass
+            else:
+                # Retained IDs must not overwrite history or let a previous
+                # controller publication complete a new dispatch reservation.
+                raise BridgeError(409, 'request_id_conflict', 'The request ID already belongs to retained history.')
             if len(self._commands) >= MAX_QUEUE_SIZE:
                 raise BridgeError(429, "queue_full", "STEVE's submission queue is full.")
             self.feed.accept(submission.request_id, submission.prompt, submission.render_project_id, submission.render_user_id)
@@ -463,7 +575,7 @@ class ExternalBridge:
             with self._lock:
                 self._last_contact = self._clock()
             if handler.command == "OPTIONS":
-                if handler.path not in {"/v1/status", "/v1/ping", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions", "/v1/events", "/v1/activity", "/v1/storage", "/v1/storage/result", "/v1/preview"}:
+                if handler.path not in {"/v1/status", "/v1/ping", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions", "/v1/events", "/v1/activity", "/v1/project", "/v1/storage", "/v1/storage/result", "/v1/preview"}:
                     raise BridgeError(404, "not_found", "Route not found.")
                 self._send(handler, 204, None, origin)
                 return
@@ -481,6 +593,9 @@ class ExternalBridge:
                 body = handler.rfile.read(length)
             if handler.command == "GET" and handler.path == "/v1/status":
                 result, status = self.status(), 200
+            elif handler.command == "POST" and handler.path == "/v1/project":
+                self._authenticate(handler, body)
+                result, status = self.project_request(self._json(body), handler), 200
             elif handler.command == "POST" and handler.path == "/v1/ping":
                 self._authenticate(handler, body)
                 if self._json(body):
@@ -504,7 +619,22 @@ class ExternalBridge:
                     if handler.path == "/v1/storage/result":
                         if set(payload) != {"requestId"}:
                             raise ValueError("Expected requestId only.")
-                        result = self.storage.result(_text(payload.get("requestId"), "requestId", 128, required=True))
+                        operation_id = _text(payload.get("requestId"), "requestId", 128, required=True)
+                        with self._lock:
+                            self._check_authenticated(handler)
+                            if operation_id in self._save_retries:
+                                try:
+                                    self._require_request(self._save_retries[operation_id])
+                                except KeyError:
+                                    raise BridgeError(404, "request_not_found", "Unknown STEVE request.")
+                            try:
+                                result = self.storage.result(operation_id)
+                            except ValueError:
+                                self._save_retries.pop(operation_id, None)
+                                self._pending_retries.discard(operation_id)
+                                raise
+                            if not result['pending']:
+                                self._pending_retries.discard(operation_id)
                     else:
                         allowed = {"getSettings": {"action"}, "projects": {"action"}, "chooseFolder": {"action"},
                                    "folders": {"action", "projectId", "folderId"},
@@ -516,7 +646,27 @@ class ExternalBridge:
                         for field in ("projectId", "folderId", "requestId"):
                             if field in payload:
                                 _text(payload[field], field, 2048)
-                        result = self.storage.submit(request_id, payload)
+                        with self._lock:
+                            self._check_authenticated(handler)
+                            if action == "retrySave":
+                                try:
+                                    self._require_request(payload.get("requestId"))
+                                except KeyError:
+                                    raise BridgeError(404, "request_not_found", "Unknown STEVE request.")
+                            result = self.storage.submit(request_id, payload)
+                            if action == "retrySave":
+                                for old_id in tuple(self._save_retries):
+                                    try:
+                                        old = self.storage.result(old_id)
+                                    except ValueError:
+                                        self._save_retries.pop(old_id, None)
+                                        self._pending_retries.discard(old_id)
+                                    else:
+                                        if not old['pending']:
+                                            self._pending_retries.discard(old_id)
+                                self._save_retries[request_id] = payload["requestId"]
+                                if result["pending"]:
+                                    self._pending_retries.add(request_id)
                     status = 202 if result["pending"] else 200
                 except ValueError as error:
                     raise BridgeError(400, "invalid_storage_request", str(error))
@@ -529,7 +679,10 @@ class ExternalBridge:
                     raise BridgeError(503, 'preview_unavailable', 'Live Fusion preview is unavailable.')
                 try:
                     request_id = _text(payload.get('requestId'), 'requestId', MAX_REQUEST_ID_CHARS, required=True)
-                    result = self.preview.request(request_id, payload['afterRevision'])
+                    with self._lock:
+                        self._check_authenticated(handler)
+                        self._require_request(request_id)
+                        result = self.preview.request(request_id, payload['afterRevision'])
                     status = 202 if result.get('pending') else 200
                 except KeyError:
                     raise BridgeError(404, 'request_not_found', 'Unknown STEVE request.')
@@ -541,7 +694,16 @@ class ExternalBridge:
                 if set(payload) != {'renderUserId', 'after'} or type(payload.get('after')) is not int or payload['after'] < 0:
                     raise BridgeError(400, 'invalid_request', 'Expected renderUserId and nonnegative integer after.')
                 user_id = _text(payload.get('renderUserId'), 'renderUserId', 256, required=True)
-                result, status = self.feed.activity(user_id, payload['after']), 200
+                with self._lock:
+                    self._check_authenticated(handler)
+                    self._project_available()
+                    binding = self.project.binding
+                    result = self.feed.activity(user_id, payload['after'])
+                    visible = binding is not None and binding.renderUserId == user_id
+                    result['requests'] = [r for r in result['requests'] if visible and r.get('renderProjectId') == binding.renderProjectId]
+                    result['binding'] = binding.public() if visible else None
+                    result['epoch'] = sha256((result['epoch'] + ':' + (binding.revision if visible else 'unbound')).encode()).hexdigest()
+                    status = 200
             elif handler.command == "POST" and handler.path == "/v1/events":
                 self._authenticate(handler, body)
                 payload = self._json(body)
@@ -552,17 +714,23 @@ class ExternalBridge:
                     if project_lookup:
                         project_id = _text(payload.get('renderProjectId'), 'renderProjectId', 256, required=True)
                         user_id = _text(payload.get('renderUserId'), 'renderUserId', 256, required=True)
-                        result = self.feed.latest(project_id, user_id)
+                        with self._lock:
+                            self._check_authenticated(handler)
+                            self._require_project(user_id, project_id)
+                            result = self.feed.latest(project_id, user_id)
                     else:
                         request_id = _text(payload.get("requestId"), "requestId", MAX_REQUEST_ID_CHARS, required=True)
-                        result = self.feed.read(request_id, payload["after"])
+                        with self._lock:
+                            self._check_authenticated(handler)
+                            self._require_request(request_id)
+                            result = self.feed.read(request_id, payload["after"])
                     status = 200
                 except KeyError:
                     raise BridgeError(404, "request_not_found", "Request is unknown or its events have expired.")
             elif handler.command == "POST" and handler.path == "/v1/submissions":
                 request_id, body_hash = self._authenticate(handler, body)
                 submission = _submission(self._json(body), request_id)
-                accepted = self._enqueue(submission, body_hash)
+                accepted = self._enqueue(submission, body_hash, handler)
                 result, status = {"version": PROTOCOL_VERSION, "requestId": request_id, "accepted": accepted}, 202 if accepted else 200
             else:
                 raise BridgeError(404, "not_found", "Route not found.")

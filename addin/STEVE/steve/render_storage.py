@@ -54,10 +54,32 @@ class RenderStorage:
                 raise ValueError('Storage queue is full; retry later.')
             self.operations[request_id] = {'body': encoded, 'pending': True}
             self.queue.append((request_id, payload))
-            while len(self.operations) > 128:
-                self.operations.popitem(last=False)
+            for key in list(self.operations):
+                if len(self.operations) <= 128:
+                    break
+                # Claimed work is no longer in queue. Keep its pending result as
+                # the bridge's reservation until run_main publishes completion.
+                if not self.operations[key]['pending']:
+                    self.operations.pop(key)
         self.wake()
         return {'requestId': request_id, 'pending': True}
+
+    def connection_busy(self):
+        """Include claimed operations before connection-scoped cache removal."""
+        with self.lock:
+            return (self.dialog_open or any(op['pending'] for op in self.operations.values())
+                    or any(job['state'] in {'running', 'pending', 'uploading'} for job in self.jobs.values()))
+
+    def clear_connection(self):
+        """Forget completed connection metadata; never close or mutate documents.
+
+        The bridge checks connection_busy before committing the origin change
+        and holds its admission/queue locks throughout that transaction.
+        """
+        with self.lock:
+            self.operations.clear()
+            self.queue.clear()
+            self.jobs.clear()
 
     def result(self, request_id):
         with self.lock:
