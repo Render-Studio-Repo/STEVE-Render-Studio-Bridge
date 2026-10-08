@@ -1,0 +1,26 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>STEVE activity isolation fixture</title>
+<style>body{margin:0;background:#111820;color:#eaf0f5;font:14px system-ui}header{padding:18px}button,input{padding:8px;margin:4px}#viewport{height:calc(100vh - 160px);position:relative;background:linear-gradient(140deg,#233b42,#111820);margin:0 20px;border:1px solid #52626a;border-radius:12px}#context{padding:22px}.sample-model{width:180px;height:120px;border:3px solid #93bdbb;border-radius:20px;position:absolute;left:30%;top:35%;transform:rotate(-15deg);box-shadow:15px 15px #345253}p{margin:8px 0}</style>
+<header><strong>STEVE activity · isolated test data</strong><p>No production bridge requests, submissions, or project writes. Engine selection and chat visibility do not control this feed.</p>
+<button id="reply">Complete background reply</button><button id="chunk">Stream background chunk</button><button id="restart">Restart feed</button><button id="account">Switch account</button><button id="dispose">Dispose</button><input id="draft" placeholder="Draft stays focused"></header>
+<main id="viewport"><div id="context"></div><div class="sample-model" aria-label="Unchanged project A model"></div></main>
+<script type="module">
+import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-steve-activity3';
+const owner={userId:'fixture-alice',projectId:'project-a'};
+let cursor=1,epoch='fixture-epoch-1', ingested=0,opened=[];
+const records=new Map();
+function record(id,project,text,phase='completed'){return {requestId:id,renderUserId:'fixture-alice',renderProjectId:project,threadId:'fixture-thread',phase,messages:[{id:'assistant-1',role:'assistant',text}]};}
+records.set('fixture-old',record('fixture-old','project-a','Historical reply, silently loaded.'));
+const context=document.querySelector('#context');
+function label(){context.textContent=`Visible viewport: ${owner.projectId} · account: ${owner.userId} · engine: Jake · main chat closed`;}
+label();
+const ui=mountSteveActivity({host:document.querySelector('#viewport'),getOwner:()=>owner,projectLabel:id=>id==='project-a'?'Bracket assembly':'Motor mount',
+ ingest:()=>ingested++,onAvailability:()=>{},read:async ({renderUserId,after})=>({version:1,epoch,cursor,reset:after===0,requests:renderUserId==='fixture-alice'?[...records.values()]:[]}),
+ openProject:async (id,isCurrent)=>{if(isCurrent()){opened.push(id);owner.projectId=id;label();}},});
+async function change(phase,text){cursor++;records.set('fixture-background',record('fixture-background','project-b',text,phase));await ui.activity.tick();}
+document.querySelector('#reply').onclick=()=>change('completed','The motor mount is ready. Should the bolt holes be 5 mm or 6 mm?');
+document.querySelector('#chunk').onclick=()=>change('running','Checking the mounting dimensions…');
+document.querySelector('#restart').onclick=async()=>{epoch='fixture-epoch-'+crypto.randomUUID();await ui.activity.tick();await ui.activity.tick();};
+document.querySelector('#account').onclick=async()=>{owner.userId=owner.userId==='fixture-alice'?'fixture-bob':'fixture-alice';ui.activity.reset();await ui.activity.tick();label();};
+document.querySelector('#dispose').onclick=()=>ui.dispose();
+window.fixture={ui,owner,opened,change,get ingested(){return ingested;}};
+</script></html>

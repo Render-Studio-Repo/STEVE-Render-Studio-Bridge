@@ -8,13 +8,68 @@ picker). It is an integration bundle, not the entire Render Studio application.
 
 Copy `steve-connector.js`, `steve-chat-feed.js`, `steve-design-chat.js`, `steve-result-open.js`,
 `steve-connector.css`, and `steve-setup.css` into Render's `frontend/cad/`.
-Load both stylesheets. Keep these JavaScript modules together.
+Load both stylesheets. Also deploy `steve-live-preview.js`, `steve-prompt-text.js`,
+`steve-activity.js`, `steve-activity-ui.js`, `steve-activity.css`, and `steve-mark.svg`.
+Keep these modules together; the activity UI loads its stylesheet from `/cad/`.
 Copy [`examples/render-storage-settings.js`](../../examples/render-storage-settings.js)
 to `frontend/cad/steve-storage-settings.js`. That example is the canonical settings source;
 there is intentionally no second copy here. Merge `connector-fragment.html` into the CAD
 engine picker, keeping the engine button and workflow adjacent. Load the CSS once.
 Use the fork's installation link in the fragment, not upstream STEVE releases.
 Preserve the rest of the host application and its existing engine selection handlers.
+
+## Background replies and viewport notifications
+
+Mount the background watcher once at application startup, outside engine selection
+and Design Chat mounting. The current account can receive replies from any of its
+Render projects while working elsewhere. The first history load is quiet. New
+completed assistant replies show one bottom-right card with the native STEVE logo.
+Streaming chunks update the conversation without producing repeated cards.
+
+```js
+import { configureSteveActivity, configureSteveLivePreview }
+  from '../cad/steve-design-chat.js?v=20261008-steve-live-sync1';
+
+configureSteveActivity({
+  host: document.getElementById('viewport'),
+  getOwner: () => ({
+    userId: String(currentUser?.id || ''),
+    projectId: String(projectId || ''),
+  }),
+  projectLabel: id => allProjects?.find(project => String(project.id) === id)?.name || id,
+  openProject: (id, isCurrent) => isCurrent() ? loadProject(id) : Promise.resolve(),
+});
+configureSteveLivePreview({
+  THREE, scene, fit: object => fitCameraToObject(object),
+  getOwner: () => ({ userId: String(currentUser?.id || ''), projectId: String(projectId || '') }),
+});
+```
+
+Use the host's existing project loader, account getters, and Three scene. Keep the
+same cache-busted `steve-design-chat.js` URL in every importer so the page shares
+one chat store. Continue dispatching `render3d:auth-session` and
+`render3d:project-changed` from their existing lifecycle handlers.
+
+**Open chat** opens a read-only request conversation over the viewport without
+changing projects. **Open project** is the explicit navigation action; replies use
+that project's existing STEVE controls. To prevent overlapping conversation panels,
+dispatch `render3d:design-chat-open` when the normal Design Chat opens, and listen
+for `render3d:steve-activity-open` to call its existing close function. Closing
+must preserve the composer draft. The [host patch](activity-host.patch) shows these
+hooks against the deployed Render source; merge the relevant hunks into your host.
+It includes existing Render-specific imports that are not part of this portable bundle.
+
+Background activity updates the account/project/request-scoped chat cache and the
+matching project's live mesh. It does not submit prompts, switch projects, import
+saved files, or write background transcripts through a new server endpoint.
+Normal Fusion restarts retain approval and reconnect with fresh signed requests.
+Clearing browser storage or changing the configured Render address requires pairing
+again. Offline Fusion remains unavailable until it is running and reachable.
+
+Deploy `steve-activity-fixture.html` only when you want the isolated verification
+page. Its controls use synthetic account/project data and make no modeling requests.
+`npm test` exercises restart epochs, ownership, notification deduplication, disposal,
+authentication backoff, and live preview polling with no Design Chat host.
 
 ## Connect the composer
 
@@ -23,7 +78,7 @@ In `frontend/studio/app.js`, keep one integration promise for the page lifetime:
 ```js
 let steveIntegrationPromise;
 function getSteveIntegration() {
-  return steveIntegrationPromise ||= import('../cad/steve-design-chat.js?v=20261008-steve-open2')
+  return steveIntegrationPromise ||= import('../cad/steve-design-chat.js?v=20261008-steve-live-sync1')
     .then(mod => mod.mountSteveDesignChat({
       getPrompt: () => composer?.getPromptText?.() || '',
       getFusionStatus: () => api('/api/autodesk/status'),
@@ -136,7 +191,7 @@ In Render's `frontend/components/render-agent.js` (the Design Chat host), import
 
 ```js
 import { steveDesignChat, mountSteveReplyRecovery }
-  from '../cad/steve-design-chat.js?v=20261008-steve-open2';
+  from '../cad/steve-design-chat.js?v=20261008-steve-live-sync1';
 const steveChatOwner = () => ({
   userId: String(currentUserId() || ''),
   projectId: String(getProjectId() || ''),
@@ -169,14 +224,20 @@ Transcripts are stored in this browser's localStorage, scoped by account, projec
 request. This is **not server-synced conversation history**. Completed history is bounded
 to 50 requests per account/project. Clearing site data removes it; unavailable/full storage
 shows a warning. Pairing secrets remain in IndexedDB and are not copied into chat records.
-Older replies can be recovered only while the running STEVE bridge still retains them.
+Older replies can be recovered while the STEVE bridge retains them, including its
+bounded history restored after a normal restart.
 This watches Render-submitted requests; it does not mirror unrelated Fusion-only chats.
 
 Increment the host app and module query versions on deployment. A green connection badge
 alone does not verify chat rendering: the wrapper **and** host rendering hooks are required.
 See also the [protocol guide](../../docs/EXTERNAL_BRIDGE.md#live-design-chat-feed-capabilitieschatevents).
 
-## Automatically open the completed design
+## Saved design opening
+
+The legacy per-request watcher supports automatic saved-file opening as described
+below. With the background activity watcher enabled, completion is shown through
+live geometry and a notification instead; saved files remain available through the
+existing result action and Fusion library. Background discovery does not auto-import.
 
 New requests submitted through `mountSteveDesignChat` record an automatic-open intent.
 After Fusion confirms the save, `steve-result-open.js` resolves the exact saved Autodesk
@@ -193,7 +254,7 @@ Configure this once in the host application:
 
 ```js
 import { configureSteveResultOpening }
-  from '../cad/steve-design-chat.js?v=20261008-steve-open2';
+  from '../cad/steve-design-chat.js?v=20261008-steve-live-sync1';
 configureSteveResultOpening({
   api,
   getOwner: () => ({
@@ -303,7 +364,8 @@ remote server prompt-history synchronization is independent; this portable bundl
 requires no new backend endpoint for live chat or mesh delivery.
 
 The preview uses Render's existing Three scene and a separate transient group. It
-updates every two seconds while the Design Chat panel is visible, replaces the previous
+updates every two seconds while the browser page is visible, including when Design Chat
+is closed. It replaces the previous
 mesh, disposes old GPU resources, and fits the camera only on the first nonempty frame.
 Positions are millimetres and Z-up. Switching account/project clears the preview.
 Errors retain the last good geometry and show a status message. Restarted bridges can
@@ -332,3 +394,12 @@ Connection polling uses signed `POST /v1/ping` when `capabilities.authPing` is t
 This validates the stored key without submitting modeling work. Transient authentication
 errors retain the key and retry with backoff; tabs adopt a newly approved key from
 IndexedDB automatically. No modeling submissions are automatically replayed.
+
+Verification for the background activity update: 44 native bridge/feed tests and
+5 preview tests passed, along with 74 portable frontend tests. Production browser checks confirmed a real reply notification,
+its viewport conversation, and new Fusion geometry without another refresh while
+Design Chat was closed. Two zero-face Fusion bodies had blocked tessellation; the
+exporter now excludes bodies with no faces and keeps exporting valid geometry.
+The wider Render checks had 99 passes and 8 failures, including failures reproduced
+on pre-edit sources. Its deployment receipt remains unverified; these results do
+not claim the full Render application passes every check.

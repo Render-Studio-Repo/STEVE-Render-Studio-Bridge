@@ -1,0 +1,10 @@
+.steve-activity { position:absolute; right:16px; bottom:52px; z-index:180; width:min(380px,calc(100% - 32px)); pointer-events:none; color:var(--text,#eef2f6); font:13px/1.45 system-ui,sans-serif; }
+.steve-activity [hidden] { display:none!important; }
+.steve-activity-card,.steve-activity-chat { pointer-events:auto; padding:14px; border:1px solid var(--border,#435044); border-radius:12px; background:var(--panel,#18231e); box-shadow:0 8px 32px #0005; margin-top:8px; overflow-wrap:anywhere; }
+.steve-activity-mark { width:24px; height:24px; vertical-align:middle; margin-right:8px; }
+.steve-activity button { color:inherit; background:transparent; border:1px solid var(--border,#546458); border-radius:6px; padding:6px 9px; margin:4px 6px 0 0; cursor:pointer; }
+.steve-activity button:focus-visible { outline:2px solid var(--accent,#87ddae); outline-offset:2px; }
+.steve-activity-feed { max-height:min(42vh,400px); overflow:auto; }
+.steve-activity-feed p { display:grid; gap:4px; white-space:pre-wrap; padding:8px; border-radius:6px; background:#8881; }
+.steve-activity-chat > p { color:var(--muted,#a9b9ae); font-size:12px; }
+.steve-activity-cards { max-height:35vh; overflow:auto; }

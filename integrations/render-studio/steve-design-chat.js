@@ -1,3 +1,4 @@
+import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-steve-activity3';
 import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-steve-integration3";
 import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-steve-open2";
 import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-auth-ping1";
@@ -72,6 +73,17 @@ export class SteveDesignChat {
     }
     return record;
   }
+  ingestActivity(snapshot) {
+    const owner = { userId: snapshot.renderUserId, projectId: snapshot.renderProjectId };
+    const previous = this.records(owner).find(record => record.requestId === snapshot.requestId);
+    const record = { ...(previous || {}), ...owner, requestId: snapshot.requestId,
+      createdAt: previous?.createdAt || snapshot.createdAt || new Date().toISOString(),
+      prompt: previous?.prompt || snapshot.messages.find(message => message.role === 'user')?.text || '',
+      snapshot, connection: 'connected', error: '',
+      resultOpen: previous?.resultOpen || { intent: 'manual', state: 'manual', message: '' } };
+    this.write(record);
+    this.onPreviewRecord(record, { authenticated: true });
+  }
   savedRecord(record) {
     try { return JSON.parse(this.store.getItem(recordKey(record, record.requestId))); } catch { return null; }
   }
@@ -114,6 +126,7 @@ export class SteveDesignChat {
     });
   }
   watch(record, connector = this.createConnector(), { allowAutoOpen = true } = {}) {
+    if (this.activityUserId === record.userId) return Promise.resolve(record.snapshot);
     const key = recordKey(record, record.requestId);
     if (this.running.has(key)) return this.running.get(key).promise;
     const controller = new AbortController();
@@ -144,6 +157,7 @@ export class SteveDesignChat {
   recoverLatest(owner) {
     owner = { userId: String(owner.userId || ""), projectId: String(owner.projectId || "") };
     const key = ownerKey(owner);
+    if (this.activityUserId === owner.userId) return Promise.resolve(this.records(owner).at(-1) || null);
     if (this.discovering.has(key)) return this.discovering.get(key);
     const existing = this.records(owner).at(-1);
     let connector = this.recoveryConnectors.get(key);
@@ -208,7 +222,15 @@ export const steveDesignChat = new SteveDesignChat({
   onChange: detail => globalThis.window?.dispatchEvent(new CustomEvent("render3d:steve-chat-updated", { detail })),
 });
 
-let previewHost = null;
+export function configureSteveActivity(options) {
+  return mountSteveActivity({ ...options, ingest: snapshot => steveDesignChat.ingestActivity(snapshot),
+    onAvailability: available => {
+      steveDesignChat.activityUserId = available ? String(options.getOwner().userId || '') : '';
+      if (available) steveDesignChat.dispose();
+    },
+  });
+}
+
 export function configureSteveLivePreview({ THREE, scene, fit, getOwner }) {
   const layer = createStevePreviewLayer({ THREE, scene, fit });
   const connector = new SteveConnector();
@@ -223,14 +245,24 @@ export function configureSteveLivePreview({ THREE, scene, fit, getOwner }) {
       if (record?.previewStatus) { record.previewStatus = ""; steveDesignChat.write(record); }
     },
   });
-  steveDesignChat.onPreviewRecord = (record, options) => preview.observe(record, options);
+  steveDesignChat.onPreviewRecord = (record, options) => {
+    preview.observe(record, options);
+    if (document.visibilityState !== "hidden") void preview.tick();
+  };
   const timer = globalThis.window.setInterval(() => {
-    if (document.visibilityState !== "hidden" && previewHost?.isConnected && previewHost.getClientRects().length) void preview.tick();
+    if (document.visibilityState !== "hidden") void preview.tick();
   }, 2000);
-  const reset = () => preview.reset();
+  const reset = () => {
+    preview.reset();
+    for (const record of steveDesignChat.records(getOwner())) preview.observe(record);
+  };
   window.addEventListener("render3d:auth-session", reset);
   window.addEventListener("render3d:project-changed", reset);
-  window.addEventListener("pagehide", () => { window.clearInterval(timer); preview.reset(); }, { once: true });
+  window.addEventListener("pagehide", () => {
+    window.clearInterval(timer); preview.reset();
+    window.removeEventListener("render3d:auth-session", reset);
+    window.removeEventListener("render3d:project-changed", reset);
+  }, { once: true });
   return preview;
 }
 
@@ -256,7 +288,6 @@ export function mountSteveDesignChat(options) {
 }
 
 export function mountSteveReplyRecovery({ host, getOwner }) {
-  previewHost = host;
   const panel = document.createElement("details");
   panel.dataset.steveReplyRecovery = "1";
   panel.hidden = true;
@@ -318,7 +349,7 @@ export function mountSteveReplyRecovery({ host, getOwner }) {
     });
   };
   const refreshTimer = typeof globalThis.window?.setInterval === "function" ? globalThis.window.setInterval(() => {
-    if (globalThis.document?.visibilityState !== "hidden" && host.isConnected && host.getClientRects().length) recoverForCurrentOwner(true);
+    if (globalThis.document?.visibilityState !== "hidden") recoverForCurrentOwner(true);
   }, 3000) : null;
   globalThis.window?.addEventListener("pagehide", () => { if (refreshTimer !== null) globalThis.window.clearInterval(refreshTimer); }, { once: true });
   recoverForCurrentOwner();

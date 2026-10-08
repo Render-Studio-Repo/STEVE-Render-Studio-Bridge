@@ -3,7 +3,7 @@
 Copy this prompt into an AI assistant that can download files, run commands, and operate
 Autodesk Fusion on your computer:
 
-> Install https://github.com/wprojects/STEVE-Render-Studio-Bridge for Autodesk Fusion on this computer. Follow docs/INSTALL_WITH_AI.md in that repository. Download and verify the runtime, preserve any existing STEVE data, enable the add-in, help me sign in, and pair it with https://render3d.app. Verify Fusion and Render both show connected and the bridge reports ready, chatEvents, projectChatHistory, and livePreview support. Do not modify any designs. Tell me if Render still needs the Design Chat integration.
+> Install https://github.com/wprojects/STEVE-Render-Studio-Bridge for Autodesk Fusion on this computer. Follow docs/INSTALL_WITH_AI.md in that repository. Download and verify the runtime, preserve any existing STEVE data, enable the add-in, help me sign in, and pair it with https://render3d.app. Verify Fusion and Render both show connected and the bridge reports ready, authPing, chatEvents, projectChatHistory, activityFeed, and livePreview support. Do not modify any designs. Tell me if Render still needs the Design Chat integration.
 
 For a different Render instance, replace `https://render3d.app` with its exact address,
 including a port when needed. You may need to complete sign-in or approve pairing yourself.
@@ -39,12 +39,12 @@ Apple silicon. Check the host platform and that Autodesk Fusion is installed fir
 7. Verify `GET http://127.0.0.1:38173/v1/status` with the configured `Origin` header.
    Required results: `fusionRunning: true`, `providerReady: true`, `connected: true`,
    `ready: true`, `capabilities.chatEvents: true`, `capabilities.projectChatHistory: true`,
-   and `capabilities.livePreview: true`. Confirm Render says **Ready in
+   `capabilities.activityFeed: true`, and `capabilities.livePreview: true`. Confirm Render says **Ready in
    Fusion**. Do not send a modeling prompt just to check the connection.
 8. Tell the user that STEVE uses the active Fusion document when a request starts, and
    the current Data Panel project/folder as its default save destination. Open the intended
-   document before sending. Restarting STEVE or changing its Render address requires
-   pairing again.
+   document before sending. Normal STEVE restarts preserve pairing. Changing its Render
+   address or clearing the browser’s saved key requires pairing again.
 
 The green header indicator means paired, AI ready, and recent browser activity. A paired
 browser can become inactive/red when closed or throttled in the background. The detailed
@@ -60,8 +60,8 @@ website. Wire the authenticated live feed into Render's Design Chat using:
 - [Production frontend bundle and Design Chat rendering hooks](../integrations/render-studio/README.md#live-design-chat)
 - [Dependency-free protocol example](../examples/render-design-chat-client.js)
 
-The client polls at 250 ms, correlates updates to the submitted request ID, and supports
-cursor recovery. The production bundle renders replies through the host hooks and keeps
+The dependency-free request client polls at 250 ms. The production background activity
+watcher polls every two seconds across projects and supports cursor/epoch recovery. The production bundle renders replies through the host hooks and keeps
 account/project-scoped history in browser localStorage. The bridge also retains bounded
 public history locally and can recover the latest matching project chat after reconnecting.
 Deploy both the chat wrapper and rendering hooks, then refresh the Render page. A prompt using **Jake** is not routed to STEVE, regardless of its AI model selection.
@@ -84,3 +84,7 @@ is a temporary mesh of the pinned document, independent of saved-file import. It
 while Design Chat is open. Refresh Render after deploying changed JavaScript. If Render
 says to connect first, pair from the browser UI; a green/paired Fusion server alone does
 not prove the current browser still holds its pairing key.
+
+Mount `configureSteveActivity` once at application startup for background STEVE
+notifications and read-only viewport conversations, independently of the CAD engine
+and Design Chat visibility. See the [background wiring recipe](../integrations/render-studio/README.md#background-replies-and-viewport-notifications).
