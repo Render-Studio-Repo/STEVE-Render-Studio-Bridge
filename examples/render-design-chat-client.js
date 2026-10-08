@@ -25,7 +25,7 @@ export function createSteveChatClient({secret, baseUrl = 'http://127.0.0.1:38173
   return {
     async storage(payload, {requestId = crypto.randomUUID(), signal} = {}) {
       let result = await signedPost('/v1/storage', payload, requestId, signal);
-      const deadline = Date.now() + 30000;
+      const deadline = Date.now() + (payload.action === 'chooseFolder' ? 600000 : 30000);
       while (result.pending) {
         if (Date.now() > deadline) {
           const error = new Error('Fusion storage is still pending. Retry with the same requestId.');

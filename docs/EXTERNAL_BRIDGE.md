@@ -293,3 +293,22 @@ Render's `submitCurrent` must omit project/folder IDs unless the user deliberate
 provides an override. Sending the current Data Panel IDs on every request would
 silently override the saved settings. The storage UI distinguishes the folder being
 browsed from the actual saved destination, and shows the editable document count.
+
+### Native Fusion folder picker
+
+`getSettings.nativeFolderPicker` indicates whether the installed Fusion supports
+`UserInterface.createCloudFolderDialog`. When available, show **Choose folder in
+Fusion…** and send authenticated `{"action":"chooseFolder"}` through `/v1/storage`.
+This opens Autodesk's own cloud-folder window on Fusion's main thread. Poll the
+operation result as usual, allowing up to ten minutes for user interaction.
+Cancellation returns `{"cancelled":true}`; selection returns `cancelled:false` plus
+`project` and `folder` objects containing IDs/names. Selection alone changes no
+settings or documents. Display it, then call `setSettings` when the user selects
+**Use this folder**. Never substitute a local filesystem folder dialog.
+
+The bridge refuses the picker while a STEVE task/save or modeling command is active,
+and blocks queue re-entry while the modal dialog is open. Older Fusion versions
+continue to use the dropdown browser. Render also displays `/api/autodesk/status`
+and offers its existing **Connect Fusion integration** flow when unlinked. Cloud
+account linking and local STEVE pairing are separate: the native picker uses the
+account signed into the running Fusion application.

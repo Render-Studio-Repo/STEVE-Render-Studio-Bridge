@@ -1,7 +1,7 @@
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace as O
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import unittest
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'addin/STEVE'))
@@ -62,6 +62,39 @@ class StorageTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.storage.handle({'action':'setSettings','autoSave':True,'folderId':'missing'})
         self.assertEqual(self.storage.settings['folderId'],'folder')
         with self.assertRaises(ValueError): self.storage.folder('wrong','folder')
+
+    def test_native_picker_selection_cancel_and_modal_reentry(self):
+        core=O(DialogResults=O(DialogOK=1))
+        dialog=O(dataFolder=self.folder,showDialog=Mock(return_value=1))
+        self.app.userInterface.createCloudFolderDialog=lambda:dialog
+        before=dict(self.storage.settings)
+        self.assertTrue(self.storage.handle({'action':'getSettings'})['nativeFolderPicker'])
+        with patch.dict(sys.modules,{'adsk':O(core=core),'adsk.core':core}):
+            result=self.storage.handle({'action':'chooseFolder'})
+            self.assertEqual(result['folder']['id'],'folder')
+            self.assertEqual(self.storage.settings,before)
+            dialog.showDialog.return_value=0
+            self.assertEqual(self.storage.handle({'action':'chooseFolder'}),{'cancelled':True})
+            self.assertEqual(self.storage.settings,before)
+            self.storage.dialog_open=True
+            self.storage.submit('rpc',{'action':'projects'})
+            self.storage.run_main()
+            self.assertTrue(self.storage.result('rpc')['pending'])
+            self.assertTrue(self.storage.saving())
+
+    def test_native_picker_does_not_open_during_modeling(self):
+        self.app.userInterface.createCloudFolderDialog=Mock()
+        self.storage.submit('picker',{'action':'chooseFolder'})
+        self.storage.run_main(allow_save=False)
+        self.assertIn('finish',self.storage.result('picker')['error'])
+        self.app.userInterface.createCloudFolderDialog.assert_not_called()
+
+    def test_native_picker_exception_releases_modal_guard(self):
+        core=O(DialogResults=O(DialogOK=1))
+        self.app.userInterface.createCloudFolderDialog=Mock(side_effect=RuntimeError('dialog failed'))
+        with patch.dict(sys.modules,{'adsk':O(core=core),'adsk.core':core}):
+            with self.assertRaises(RuntimeError):self.storage.handle({'action':'chooseFolder'})
+        self.assertFalse(self.storage.dialog_open)
     def test_switching_document_or_active_command_defers_save(self):
         self.start();self.app.activeDocument=O();self.storage.run_main();self.doc.saveAs.assert_not_called()
         self.app.activeDocument=self.doc;self.app.userInterface.activeCommand='Extrude';self.storage.jobs['request']['next']=0

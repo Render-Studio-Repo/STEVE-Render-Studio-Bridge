@@ -2,8 +2,10 @@
  * Mount Fusion storage settings with an authenticated client.storage(payload).
  * Returns cleanup immediately; in-flight requests cannot be cancelled, but their
  * results are ignored after cleanup. Browsing never changes the saved destination.
+ * Optional fusionIntegration supplies getStatus() and connect(); the host owns
+ * authentication. Its cloud connection does not gate the local Fusion picker.
  */
-export function mountSteveStorageSettings(root, client) {
+export function mountSteveStorageSettings(root, client, { fusionIntegration } = {}) {
   if (!root?.ownerDocument || typeof client?.storage !== 'function') {
     throw new TypeError('A DOM root and a storage client are required.');
   }
@@ -38,6 +40,11 @@ export function mountSteveStorageSettings(root, client) {
   const back = button('Parent folder');
   const save = button('Use this folder');
   const current = button('Use current Fusion Data Panel folder');
+  const choose = button('Choose folder in Fusion…');
+  const integrationStatus = node('p');
+  integrationStatus.setAttribute('role', 'status');
+  const connect = button('Connect Fusion integration');
+  const retryConnection = button('Retry connection status');
   const retry = button('Retry');
   const status = node('p');
   status.setAttribute('role', 'status');
@@ -47,12 +54,13 @@ export function mountSteveStorageSettings(root, client) {
   const limits = node('p');
   section.append(
     node('h3', 'Fusion autosave'),
+    integrationStatus, connect, retryConnection,
     label('Automatically save successful STEVE requests ', checkbox),
     savedLocation,
     label('Fusion project ', projects),
     browseLocation,
     label('Fusion subfolder ', folders),
-    open, back, save, current, status, retry, warning, limits,
+    open, back, save, choose, current, status, retry, warning, limits,
     node('p', 'New documents use the saved destination. Existing documents save in place. '
       + 'The current Fusion Data Panel folder is captured when each request starts.')
   );
@@ -66,7 +74,11 @@ export function mountSteveStorageSettings(root, client) {
   let savedName = '';
   let projectList = [];
   let retryAction = null;
-  const controls = [checkbox, projects, folders, open, back, save, current, retry];
+  let nativeFolderPicker = false;
+  let connectionBusy = false;
+  const controls = [checkbox, projects, folders, open, back, save, choose, current,
+    retry, connect, retryConnection];
+  integrationStatus.hidden = connect.hidden = retryConnection.hidden = true;
 
   const sameDestination = (a, b) => a && b
     && a.projectId === b.projectId && a.folderId === b.folderId;
@@ -93,6 +105,8 @@ export function mountSteveStorageSettings(root, client) {
     back.disabled = busy || !parents.length;
     save.disabled = busy || !settings || !selected;
     current.disabled = busy || !settings;
+    choose.hidden = !nativeFolderPicker;
+    choose.disabled = busy || !settings || !nativeFolderPicker;
     retry.hidden = !retryAction;
     retry.disabled = busy || !retryAction;
     projects.value = selected?.projectId ?? '';
@@ -123,8 +137,8 @@ export function mountSteveStorageSettings(root, client) {
     status.textContent = pendingText;
     render();
     try {
-      await action();
-      if (!disposed) status.textContent = 'Storage settings are up to date.';
+      const successText = await action();
+      if (!disposed) status.textContent = successText ?? 'Storage settings are up to date.';
     } catch (error) {
       if (!disposed) {
         retryAction = () => work(action, pendingText);
@@ -160,6 +174,7 @@ export function mountSteveStorageSettings(root, client) {
     const result = await request({ action: 'getSettings' });
     settings = readSettings(result);
     savedName = '';
+    nativeFolderPicker = result.nativeFolderPicker === true;
     warning.textContent = result.configError || '';
     const quota = result.limits;
     limits.textContent = quota?.limited
@@ -183,6 +198,70 @@ export function mountSteveStorageSettings(root, client) {
     }
   }
 
+  // Cloud integration status is independent of Fusion's local login and picker.
+  async function checkConnection() {
+    if (disposed || connectionBusy || !fusionIntegration) return;
+    connectionBusy = true;
+    integrationStatus.hidden = false;
+    integrationStatus.textContent = 'Checking Fusion integration connection…';
+    connect.hidden = true;
+    retryConnection.hidden = true;
+    try {
+      const result = await fusionIntegration.getStatus();
+      if (disposed) return;
+      if (typeof result?.linked !== 'boolean') {
+        throw new Error('Invalid Fusion integration connection status.');
+      }
+      const account = [result.autodesk_name, result.autodesk_email]
+        .filter((value) => typeof value === 'string' && value.trim()).join(' — ');
+      integrationStatus.textContent = result.linked
+        ? `Fusion integration connected${account ? `: ${account}` : '.'}`
+        : 'Fusion integration is not connected.';
+      connect.hidden = result.linked;
+    } catch (error) {
+      if (!disposed) {
+        integrationStatus.textContent = `Could not check Fusion integration connection: ${error instanceof Error ? error.message : String(error)}`;
+        retryConnection.hidden = false;
+      }
+    } finally {
+      connectionBusy = false;
+    }
+  }
+  connect.onclick = async () => {
+    if (disposed || connectionBusy || !fusionIntegration) return;
+    connectionBusy = true;
+    connect.disabled = true;
+    try {
+      await fusionIntegration.connect();
+      if (!disposed) {
+        integrationStatus.textContent = 'Complete the Fusion integration connection, then retry connection status.';
+        retryConnection.hidden = false;
+      }
+    } catch (error) {
+      if (!disposed) {
+        integrationStatus.textContent = `Could not connect Fusion integration: ${error instanceof Error ? error.message : String(error)}`;
+        retryConnection.hidden = false;
+      }
+    } finally {
+      connectionBusy = false;
+      if (!disposed) connect.disabled = false;
+    }
+  };
+  retryConnection.onclick = () => { void checkConnection(); };
+  choose.onclick = () => {
+    if (!settings || !nativeFolderPicker) return;
+    const requestId = globalThis.crypto.randomUUID();
+    void work(async () => {
+      const result = await client.storage({ action: 'chooseFolder' }, { requestId });
+      if (disposed) return;
+      if (result?.cancelled === true) return 'Folder selection cancelled.';
+      if (result?.cancelled !== false || !result.project?.id || !result.folder?.id) {
+        throw new Error('Fusion returned an invalid folder selection.');
+      }
+      await browse(result.project.id, result.folder.id, []);
+      return 'Folder selected; click Use this folder to save it.';
+    }, 'Switch to Fusion to choose a folder');
+  };
   checkbox.onchange = () => {
     if (!settings || busy || disposed) { render(); return; }
     const next = { ...settings, autoSave: checkbox.checked };
@@ -220,6 +299,7 @@ export function mountSteveStorageSettings(root, client) {
   };
   retry.onclick = () => { if (retryAction) void retryAction(); };
   void work(initialize, 'Loading storage settings…');
+  void checkConnection();
 
   return () => {
     disposed = true;

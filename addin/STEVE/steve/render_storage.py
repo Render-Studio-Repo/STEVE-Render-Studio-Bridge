@@ -25,6 +25,7 @@ class RenderStorage:
         self.operations = OrderedDict()
         self.queue = deque()
         self.jobs = OrderedDict()
+        self.dialog_open = False
         self.settings = {"autoSave": True, "projectId": None, "folderId": None}
         self.config_error = ""
         try:
@@ -105,7 +106,32 @@ class RenderStorage:
     def handle(self, payload):
         action = payload.get('action')
         if action == 'getSettings':
-            return {**self.settings, 'configError': self.config_error, 'limits': self.limits()}
+            return {**self.settings, 'configError': self.config_error, 'limits': self.limits(),
+                    'nativeFolderPicker': callable(getattr(self.app.userInterface, 'createCloudFolderDialog', None))}
+        if action == 'chooseFolder':
+            ui = self.app.userInterface
+            create_dialog = getattr(ui, 'createCloudFolderDialog', None)
+            if not callable(create_dialog):
+                raise ValueError('Update Fusion to use its cloud folder picker, or use the project and folder lists.')
+            if self.dialog_open or self.saving() or ui.activeCommand not in {'', 'SelectCommand'}:
+                raise ValueError('Finish the active Fusion command or save before choosing a folder.')
+            import adsk.core
+            self.dialog_open = True
+            try:
+                dialog = create_dialog()
+                dialog.title = 'Choose Render Studio autosave folder'
+                try:
+                    dialog.initialFolder = self.folder(self.settings['projectId'], self.settings['folderId'])
+                except ValueError:
+                    pass  # Let the native dialog recover an inaccessible saved destination.
+                if dialog.showDialog() != adsk.core.DialogResults.DialogOK:
+                    return {'cancelled': True}
+                folder = dialog.dataFolder
+                if folder is None or not folder.isValid:
+                    raise ValueError('Fusion did not return an accessible cloud folder.')
+                return {'cancelled': False, 'project': info(folder.parentProject), 'folder': info(folder)}
+            finally:
+                self.dialog_open = False
         if action == 'projects':
             return {'hub': info(self.app.data.activeHub), 'projects': [info(p) for p in entries(self.app.data.dataProjects)]}
         if action == 'folders':
@@ -168,14 +194,18 @@ class RenderStorage:
 
     def saving(self):
         with self.lock:
-            return any(j['state'] in {'pending','uploading'} for j in self.jobs.values())
+            return self.dialog_open or any(j['state'] in {'pending','uploading'} for j in self.jobs.values())
 
     def run_main(self, allow_save=True):
         # This method alone touches Autodesk objects, always on Fusion's main thread.
+        if self.dialog_open:
+            return  # Modal dialogs pump events; never re-enter this queue while one is open.
         with self.lock:
             work = list(self.queue); self.queue.clear()
         for request_id, payload in work:
             try:
+                if payload.get('action') == 'chooseFolder' and not allow_save:
+                    raise ValueError('Wait for the current STEVE request to finish before opening the folder picker.')
                 result = {'pending': False, 'result': self.handle(payload)}
             except Exception as error:
                 result = {'pending': False, 'error': str(error)[:2000]}

@@ -433,7 +433,7 @@ class ExternalBridge:
                             raise ValueError("Expected requestId only.")
                         result = self.storage.result(_text(payload.get("requestId"), "requestId", 128, required=True))
                     else:
-                        allowed = {"getSettings": {"action"}, "projects": {"action"},
+                        allowed = {"getSettings": {"action"}, "projects": {"action"}, "chooseFolder": {"action"},
                                    "folders": {"action", "projectId", "folderId"},
                                    "setSettings": {"action", "autoSave", "projectId", "folderId"},
                                    "retrySave": {"action", "requestId"}}
