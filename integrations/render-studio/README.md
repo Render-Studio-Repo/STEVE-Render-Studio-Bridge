@@ -9,7 +9,7 @@ picker). It is an integration bundle, not the entire Render Studio application.
 Copy `steve-connector.js`, `steve-chat-feed.js`, `steve-design-chat.js`, `steve-result-open.js`,
 `steve-connector.css`, and `steve-setup.css` into Render's `frontend/cad/`.
 Load both stylesheets. Also deploy `steve-live-preview.js`, `steve-prompt-text.js`,
-`steve-activity.js`, `steve-activity-ui.js`, `steve-activity.css`, and `steve-mark.svg`.
+`steve-activity.js`, `steve-activity-ui.js`, `steve-activity.css`, `steve-project-binding.js`, and `steve-mark.svg`.
 Keep these modules together; the activity UI loads its stylesheet from `/cad/`.
 Copy [`examples/render-storage-settings.js`](../../examples/render-storage-settings.js)
 to `frontend/cad/steve-storage-settings.js`. That example is the canonical settings source;
@@ -21,14 +21,14 @@ Preserve the rest of the host application and its existing engine selection hand
 ## Background replies and viewport notifications
 
 Mount the background watcher once at application startup, outside engine selection
-and Design Chat mounting. The current account can receive replies from any of its
-Render projects while working elsewhere. The first history load is quiet. New
+and Design Chat mounting. STEVE receives live updates only for its locked Render account and project, even
+while you view another project. The first history load is quiet. New
 completed assistant replies show one bottom-right card with the native STEVE logo.
 Streaming chunks update the conversation without producing repeated cards.
 
 ```js
 import { configureSteveActivity, configureSteveLivePreview }
-  from '../cad/steve-design-chat.js?v=20261008-steve-live-sync1';
+  from '../cad/steve-design-chat.js?v=20261008-project-lock-p1';
 
 configureSteveActivity({
   host: document.getElementById('viewport'),
@@ -37,6 +37,7 @@ configureSteveActivity({
     projectId: String(projectId || ''),
   }),
   projectLabel: id => allProjects?.find(project => String(project.id) === id)?.name || id,
+  getProjects: () => allProjects || [],
   openProject: (id, isCurrent) => isCurrent() ? loadProject(id) : Promise.resolve(),
 });
 configureSteveLivePreview({
@@ -59,8 +60,8 @@ must preserve the composer draft. The [host patch](activity-host.patch) shows th
 hooks against the deployed Render source; merge the relevant hunks into your host.
 It includes existing Render-specific imports that are not part of this portable bundle.
 
-Background activity updates the account/project/request-scoped chat cache and the
-matching project's live mesh. It does not submit prompts, switch projects, import
+Background activity updates only the locked project's request-scoped chat cache.
+It displays the live mesh only when the viewport also shows that project. It does not submit prompts, switch projects, import
 saved files, or write background transcripts through a new server endpoint.
 Normal Fusion restarts retain approval and reconnect with fresh signed requests.
 Clearing browser storage or changing the configured Render address requires pairing
@@ -71,6 +72,35 @@ page. Its controls use synthetic account/project data and make no modeling reque
 `npm test` exercises restart epochs, ownership, notification deduplication, disposal,
 authentication backoff, and live preview polling with no Design Chat host.
 
+## Keep STEVE locked to its project
+
+The native bridge owns one project binding for the paired Render origin. A visible
+project change never changes that binding. Render displays the locked project name
+and ID, with an explicit action to open it.
+
+To move the connection, use **Change project**, review the old and new IDs, and
+confirm. STEVE refuses a change while work is active or queued. A confirmation from
+a stale browser tab cannot replace a newer selection. Cancel leaves the lock intact.
+
+Before recording or submitting a new request, read the authenticated binding and
+check it against the captured composer owner. Include `bindingRevision` with the
+submission. If the project differs, block the send and offer to open the locked
+project. Do not move the draft or silently send it to the locked project. An older
+STEVE server without `projectBinding` support must be updated before submitting.
+
+A binding change clears live notifications, the selected activity conversation, and
+preview state. In-flight responses from an earlier binding must not draw a model.
+Cached history from another project remains historical and cannot seed live geometry.
+Pairing approval and the project lock both persist across normal Fusion restarts.
+
+The [host patch](project-lock-host.patch) records the deployed Render hooks, including
+its existing project-list run badges. Those Render-specific history and badge helpers
+are host code, not dependencies supplied by this portable bundle. Merge the relevant
+hooks and update every importer to the same module version.
+
+The [project binding protocol](../../docs/EXTERNAL_BRIDGE.md#lock-steve-to-one-render-project)
+defines the signed reads, explicit compare-and-set change, and submission fields.
+
 ## Connect the composer
 
 In `frontend/studio/app.js`, keep one integration promise for the page lifetime:
@@ -78,7 +108,7 @@ In `frontend/studio/app.js`, keep one integration promise for the page lifetime:
 ```js
 let steveIntegrationPromise;
 function getSteveIntegration() {
-  return steveIntegrationPromise ||= import('../cad/steve-design-chat.js?v=20261008-steve-live-sync1')
+  return steveIntegrationPromise ||= import('../cad/steve-design-chat.js?v=20261008-project-lock-p1')
     .then(mod => mod.mountSteveDesignChat({
       getPrompt: () => composer?.getPromptText?.() || '',
       getFusionStatus: () => api('/api/autodesk/status'),
@@ -191,7 +221,7 @@ In Render's `frontend/components/render-agent.js` (the Design Chat host), import
 
 ```js
 import { steveDesignChat, mountSteveReplyRecovery }
-  from '../cad/steve-design-chat.js?v=20261008-steve-live-sync1';
+  from '../cad/steve-design-chat.js?v=20261008-project-lock-p1';
 const steveChatOwner = () => ({
   userId: String(currentUserId() || ''),
   projectId: String(getProjectId() || ''),
@@ -254,7 +284,7 @@ Configure this once in the host application:
 
 ```js
 import { configureSteveResultOpening }
-  from '../cad/steve-design-chat.js?v=20261008-steve-live-sync1';
+  from '../cad/steve-design-chat.js?v=20261008-project-lock-p1';
 configureSteveResultOpening({
   api,
   getOwner: () => ({

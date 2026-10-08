@@ -1,3 +1,4 @@
+import { bindingOwns } from './steve-project-binding.js?v=20261008-project-lock-p1';
 const sameOwner = (a, b) => Boolean(a?.userId && a?.projectId && a.userId === b?.userId && a.projectId === b?.projectId);
 
 export function validateStevePreview(packet, requestId, afterRevision = 0) {
@@ -24,11 +25,12 @@ export function validateStevePreview(packet, requestId, afterRevision = 0) {
 }
 
 export class SteveLivePreview {
-  constructor({ getOwner, post, display, clear, onError = () => {} }) {
-    Object.assign(this, { getOwner, post, display, clear, onError });
+  constructor({ getOwner, getBinding, post, display, clear, onError = () => {} }) {
+    Object.assign(this, { getOwner, getBinding, post, display, clear, onError });
     this.record = null; this.revision = 0; this.hasFramed = false; this.epoch = 0; this.busy = false; this.blocked = false;
   }
-  observe(record, { authenticated = false } = {}) {
+  observe(record, { authenticated = false, bindingRevision } = {}) {
+    if (this.getBinding && (!authenticated || !bindingOwns(this.getBinding(), record) || bindingRevision !== this.getBinding()?.revision)) return;
     if (!sameOwner(record, this.getOwner())) return;
     if (this.record?.requestId === record.requestId && sameOwner(this.record, record)) {
       if (authenticated === true) this.blocked = false;
@@ -36,23 +38,24 @@ export class SteveLivePreview {
     }
     if (sameOwner(this.record, record) && this.record.createdAt > record.createdAt) return;
     this.clear(); this.epoch++; this.revision = 0; this.hasFramed = false; this.blocked = false;
-    this.record = { userId: record.userId, projectId: record.projectId, requestId: record.requestId, createdAt: record.createdAt };
+    this.record = { userId: record.userId, projectId: record.projectId, requestId: record.requestId, createdAt: record.createdAt, bindingRevision };
   }
+  bindingMatches(record) { return !this.getBinding || (bindingOwns(this.getBinding(), record) && record?.bindingRevision === this.getBinding()?.revision); }
   async tick() {
-    if (this.record && !sameOwner(this.record, this.getOwner())) this.reset();
+    if (this.record && (!sameOwner(this.record, this.getOwner()) || !this.bindingMatches(this.record))) this.reset();
     if (!this.record || this.busy || this.blocked) return;
     const record = this.record, epoch = this.epoch;
     this.busy = true;
     try {
       const packet = await this.post({ requestId: record.requestId, afterRevision: this.revision });
-      if (epoch !== this.epoch || !sameOwner(record, this.getOwner())) return;
+      if (epoch !== this.epoch || !sameOwner(record, this.getOwner()) || !this.bindingMatches(record)) return;
       const snapshot = validateStevePreview(packet, record.requestId, this.revision);
       if (!snapshot) return;
       this.display(snapshot, { first: !this.hasFramed });
       if (snapshot.bodies.some(body => body.indices.length)) this.hasFramed = true;
       this.revision = snapshot.revision;
     } catch (error) {
-      if (epoch !== this.epoch || !sameOwner(record, this.getOwner())) return;
+      if (epoch !== this.epoch || !sameOwner(record, this.getOwner()) || !this.bindingMatches(record)) return;
       if (error.status === 401 || error.status === 403 || error.code === "steve_preview_unavailable") this.blocked = true;
       this.onError(error, record);
     } finally { this.busy = false; }

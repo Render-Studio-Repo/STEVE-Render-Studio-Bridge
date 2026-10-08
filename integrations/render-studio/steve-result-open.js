@@ -1,3 +1,5 @@
+import { steveProjectBinding } from './steve-project-binding.js?v=20261008-project-lock-p1';
+
 export function savedSteveResult(record) {
   const save = record.snapshot?.save;
   if (record.snapshot?.phase !== "completed" || !["saved", "unchanged"].includes(save?.state)) return null;
@@ -8,16 +10,22 @@ export function savedSteveResult(record) {
 
 export class SteveResultOpener {
   constructor({ api, getOwner, openFile, persist, readRecord,
+    getBindingState = () => steveProjectBinding,
     lock = (key, run) => globalThis.navigator?.locks
       ? globalThis.navigator.locks.request(key, run)
       : Promise.reject(new Error("Open Fusion library to import this result; browser import coordination is unavailable.")),
   }) {
-    Object.assign(this, { api, getOwner, openFile, persist, readRecord, lock });
+    Object.assign(this, { api, getOwner, openFile, persist, readRecord, lock, getBindingState });
     this.running = new Map();
   }
-  isCurrent(record) {
+  isCurrent(record, scope) {
     const owner = this.getOwner();
-    return String(owner.userId || "") === record.userId && String(owner.projectId || "") === record.projectId;
+    if (String(owner.userId || "") !== record.userId || String(owner.projectId || "") !== record.projectId) return false;
+    if (scope?.manual) return true;
+    const state = this.getBindingState(), binding = state?.binding;
+    return Boolean(scope?.revision && binding && !state.changing && state.generation === scope.generation
+      && binding.renderUserId === scope.userId && binding.renderProjectId === scope.projectId
+      && binding.revision === scope.revision);
   }
   update(record, state, message, extra = {}) {
     record.resultOpen = { ...record.resultOpen, ...extra, state, message };
@@ -29,13 +37,15 @@ export class SteveResultOpener {
     return this.open(record);
   }
   open(record, { manual = false } = {}) {
+    const scope = Object.freeze({ manual, userId: record.userId, projectId: record.projectId,
+      revision: record.bindingRevision, generation: this.getBindingState()?.generation });
     const key = "render3d:steve-result:" + [record.userId, record.projectId, record.requestId].map(encodeURIComponent).join(":");
     if (this.running.has(key)) return this.running.get(key);
     const run = this.lock(key, async () => {
       const saved = this.readRecord(record);
       if (saved?.resultOpen) record.resultOpen = saved.resultOpen;
       if (!manual && (record.resultOpen?.intent !== "auto" || record.resultOpen?.state !== "pending")) return;
-      if (!this.isCurrent(record)) {
+      if (!this.isCurrent(record, scope)) {
         this.update(record, "manual", "Return to the original Render project and choose Open saved design.");
         return;
       }
@@ -43,7 +53,7 @@ export class SteveResultOpener {
         this.update(record, "uncertain", "An import may already exist. Check the original project's files or Fusion library; automatic import will not repeat.");
         return;
       }
-      if (record.resultOpen?.result) return this.display(record, record.resultOpen.result);
+      if (record.resultOpen?.result) return this.display(record, record.resultOpen.result, scope);
       const file = savedSteveResult(record);
       if (!file) {
         this.update(record, "manual", "The saved Fusion location is not available yet. Check save status or open Fusion library.");
@@ -54,17 +64,18 @@ export class SteveResultOpener {
         const hubs = await this.api("/api/autodesk/hubs");
         let hubId = "";
         for (const hub of hubs.hubs || []) {
-          if (!this.isCurrent(record)) throw new Error("Context changed. Return to the original Render project to open this design.");
+          if (!this.isCurrent(record, scope)) throw new Error("Context changed. Return to the original Render project to open this design.");
           const projects = await this.api("/api/autodesk/hubs/" + encodeURIComponent(hub.id) + "/projects");
           if ((projects.projects || []).some(project => String(project.id) === file.fusionProjectId)) { hubId = hub.id; break; }
         }
         if (!hubId) throw new Error("Saved Fusion project is not available in the linked Autodesk account. Open Fusion library to check the connection.");
-        if (!this.isCurrent(record)) throw new Error("Context changed. Return to the original Render project to open this design.");
+        if (!this.isCurrent(record, scope)) throw new Error("Context changed. Return to the original Render project to open this design.");
         this.update(record, "importing", "Opening saved Fusion design in Render…", { file });
         if (record.persistenceWarning) {
           this.update(record, "manual", "Browser storage is unavailable. Restore storage before importing this design.");
           return;
         }
+        if (!this.isCurrent(record, scope)) throw new Error('STEVE project lock changed. Choose Open saved design explicitly to import historical results.');
         importing = true;
         const result = await this.api("/api/autodesk/import", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -76,7 +87,7 @@ export class SteveResultOpener {
         }
         this.update(record, "imported", "Saved design imported. Open it in the original Render project.",
           { result: { project_id: result.project_id, filename: result.filename, name: result.name || file.name } });
-        await this.display(record, record.resultOpen.result);
+        await this.display(record, record.resultOpen.result, scope);
       } catch (error) {
         this.update(record, importing && !record.resultOpen?.result ? "uncertain" : "manual", error.message);
       }
@@ -84,13 +95,13 @@ export class SteveResultOpener {
     this.running.set(key, run);
     return run;
   }
-  async display(record, result) {
-    if (!this.isCurrent(record)) {
+  async display(record, result, scope) {
+    if (!this.isCurrent(record, scope)) {
       this.update(record, "imported", "Imported into the original project. Return there and choose Open saved design.");
       return;
     }
-    const opened = await this.openFile(result, () => this.isCurrent(record));
-    if (opened === false || !this.isCurrent(record)) {
+    const opened = await this.openFile(result, () => this.isCurrent(record, scope));
+    if (opened === false || !this.isCurrent(record, scope)) {
       this.update(record, "imported", "Design imported but not displayed. Return to the original project and choose Open saved design.");
       return;
     }

@@ -1,7 +1,8 @@
-import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-steve-activity3';
-import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-steve-integration3";
-import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-steve-open2";
-import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-auth-ping1";
+import { steveProjectBinding, bindingOwns } from './steve-project-binding.js?v=20261008-project-lock-p1';
+import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-project-lock-p1';
+import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-project-lock-p1";
+import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-project-lock-p1";
+import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-project-lock-p1";
 import { isSteveChatComplete } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 
 const PREFIX = "render3d:steveDesignChat:v1:";
@@ -73,16 +74,16 @@ export class SteveDesignChat {
     }
     return record;
   }
-  ingestActivity(snapshot) {
+  ingestActivity(snapshot, options = {}) {
     const owner = { userId: snapshot.renderUserId, projectId: snapshot.renderProjectId };
     const previous = this.records(owner).find(record => record.requestId === snapshot.requestId);
     const record = { ...(previous || {}), ...owner, requestId: snapshot.requestId,
       createdAt: previous?.createdAt || snapshot.createdAt || new Date().toISOString(),
       prompt: previous?.prompt || snapshot.messages.find(message => message.role === 'user')?.text || '',
-      snapshot, connection: 'connected', error: '',
+      snapshot, bindingRevision: options.bindingRevision, connection: 'connected', error: '',
       resultOpen: previous?.resultOpen || { intent: 'manual', state: 'manual', message: '' } };
     this.write(record);
-    this.onPreviewRecord(record, { authenticated: true });
+    this.onPreviewRecord(record, { authenticated: true, bindingRevision: options.bindingRevision });
   }
   savedRecord(record) {
     try { return JSON.parse(this.store.getItem(recordKey(record, record.requestId))); } catch { return null; }
@@ -181,7 +182,6 @@ export class SteveDesignChat {
       record.connection = "connected";
       record.error = "";
       this.write(record);
-      this.onPreviewRecord(record, { authenticated: true });
       if (!isSteveChatComplete(snapshot)) void this.watch(record, connector, { allowAutoOpen: false });
       return record;
     }).catch(error => {
@@ -197,17 +197,20 @@ export class SteveDesignChat {
       .map(record => this.watch(record)));
   }
   async submit(integration, { owner, prompt, requestId = globalThis.crypto.randomUUID() }) {
-    const record = this.remember({ ...owner }, requestId, prompt);
+    owner = { ...owner };
+    const bindingRevision = await integration.prepareSubmission(owner);
+    const record = this.remember(owner, requestId, prompt);
     record.resultOpen = { intent: "auto", state: "pending", message: "" };
+    record.bindingRevision = bindingRevision;
     this.write(record);
     if (record.persistenceWarning) throw new Error("Cannot save the STEVE request ID. Free browser storage before sending.");
     try {
-      const result = await integration.submitCurrent({ prompt, requestId, owner: { userId: record.userId, projectId: record.projectId } });
+      const result = await integration.submitCurrent({ prompt, requestId, bindingRevision, owner: { userId: record.userId, projectId: record.projectId } });
       void this.watch(record, integration.connector);
       return result;
     } catch (error) {
       record.error = error.message;
-      record.rejected = Boolean(error.status && error.status < 500);
+      record.rejected = Boolean(error.status && error.status < 500) || String(error.code || '').startsWith('project_');
       this.write(record);
       if (!record.rejected) void this.watch(record, integration.connector);
       throw error;
@@ -223,7 +226,7 @@ export const steveDesignChat = new SteveDesignChat({
 });
 
 export function configureSteveActivity(options) {
-  return mountSteveActivity({ ...options, ingest: snapshot => steveDesignChat.ingestActivity(snapshot),
+  return mountSteveActivity({ ...options, ingest: (snapshot, context) => steveDesignChat.ingestActivity(snapshot, context),
     onAvailability: available => {
       steveDesignChat.activityUserId = available ? String(options.getOwner().userId || '') : '';
       if (available) steveDesignChat.dispose();
@@ -234,7 +237,7 @@ export function configureSteveActivity(options) {
 export function configureSteveLivePreview({ THREE, scene, fit, getOwner }) {
   const layer = createStevePreviewLayer({ THREE, scene, fit });
   const connector = new SteveConnector();
-  const preview = new SteveLivePreview({ getOwner, post: packet => connector.preview(packet), ...layer,
+  const preview = new SteveLivePreview({ getOwner, getBinding: () => steveProjectBinding.binding, post: packet => connector.preview(packet), ...layer,
     onError: (error, owner) => {
       const record = steveDesignChat.records(owner).find(item => item.requestId === owner.requestId);
       if (record && record.previewStatus !== error.message) { record.previewStatus = error.message; steveDesignChat.write(record); }
@@ -254,12 +257,15 @@ export function configureSteveLivePreview({ THREE, scene, fit, getOwner }) {
   }, 2000);
   const reset = () => {
     preview.reset();
-    for (const record of steveDesignChat.records(getOwner())) preview.observe(record);
   };
+  let bindingGeneration = steveProjectBinding.generation;
+  const unsubscribeBinding = steveProjectBinding.subscribe(() => {
+    if (bindingGeneration !== steveProjectBinding.generation) { bindingGeneration = steveProjectBinding.generation; reset(); }
+  });
   window.addEventListener("render3d:auth-session", reset);
   window.addEventListener("render3d:project-changed", reset);
   window.addEventListener("pagehide", () => {
-    window.clearInterval(timer); preview.reset();
+    window.clearInterval(timer); unsubscribeBinding(); preview.reset();
     window.removeEventListener("render3d:auth-session", reset);
     window.removeEventListener("render3d:project-changed", reset);
   }, { once: true });

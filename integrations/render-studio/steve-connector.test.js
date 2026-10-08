@@ -105,7 +105,11 @@ test("pairing waits for Fusion approval and stores the returned secret", async (
 test("ready connector submits the exact compact payload with auth headers", async () => {
   let captured;
   const connector = new SteveConnector({
-    fetchFn: async (url, options) => { captured = { url, options }; return response(202, { accepted: true }); },
+    fetchFn: async (url, options) => {
+      if (url.endsWith('/status')) return response(200, { capabilities: { projectBinding: true } });
+      if (url.endsWith('/project')) return response(200, { version: 1, binding: { renderUserId: 'alice', renderProjectId: 'render-a', revision: 'revision-a' } });
+      captured = { url, options }; return response(202, { accepted: true });
+    },
     cryptoApi: {
       subtle: webcrypto.subtle,
       randomUUID: () => "request-fixed",
@@ -118,14 +122,14 @@ test("ready connector submits the exact compact payload with auth headers", asyn
   connector.secret = "secret";
   connector.state = "ready";
   const result = await connector.submit({
-    prompt: "Make a hinge",
+    prompt: "Make a hinge", renderProjectId: "render-a", renderUserId: "alice",
     projectId: "project-1",
     folderId: "folder-2",
     designName: "Hinge A",
   });
   assert.equal(result.requestId, "request-fixed");
   assert.equal(captured.url, "http://127.0.0.1:38173/v1/submissions");
-  assert.equal(captured.options.body, '{"prompt":"Make a hinge","projectId":"project-1","folderId":"folder-2","designName":"Hinge A"}');
+  assert.equal(captured.options.body, '{"prompt":"Make a hinge","renderProjectId":"render-a","renderUserId":"alice","bindingRevision":"revision-a","projectId":"project-1","folderId":"folder-2","designName":"Hinge A"}');
   assert.equal(captured.options.headers["X-Request-Id"], "request-fixed");
   assert.match(captured.options.headers["X-Steve-Signature"], /^[0-9a-f]{64}$/);
 });
@@ -193,6 +197,8 @@ test("latest retains stored pairing on 401", async () => {
 test("submission keeps Autodesk and Render identities separate and requires owner pair", async () => {
   let body;
   const connector = new SteveConnector({ cryptoApi: webcrypto, fetchFn: async (url, options) => {
+    if (url.endsWith('/status')) return response(200, { capabilities: { projectBinding: true } });
+    if (url.endsWith('/project')) return response(200, { version: 1, binding: { renderUserId: 'alice', renderProjectId: 'render-a', revision: 'revision-a' } });
     body = JSON.parse(options.body); return response(200, { accepted: true });
   } });
   connector.secret = "secret"; connector.state = "ready";
@@ -200,7 +206,7 @@ test("submission keeps Autodesk and Render identities separate and requires owne
   await connector.submit({ prompt: "design", projectId: "fusion-p", folderId: "fusion-f",
     renderProjectId: "render-a", renderUserId: "alice", requestId: "request-123" });
   assert.deepEqual(body, { prompt: "design", projectId: "fusion-p", folderId: "fusion-f",
-    renderProjectId: "render-a", renderUserId: "alice" });
+    renderProjectId: "render-a", renderUserId: "alice", bindingRevision: "revision-a" });
 });
 
 test("preview signs request-scoped revisions and gates older bridges", async () => {

@@ -3,7 +3,7 @@
 Copy this prompt into an AI assistant that can download files, run commands, and operate
 Autodesk Fusion on your computer:
 
-> Install https://github.com/wprojects/STEVE-Render-Studio-Bridge for Autodesk Fusion on this computer. Follow docs/INSTALL_WITH_AI.md in that repository. Download and verify the runtime, preserve any existing STEVE data, enable the add-in, help me sign in, and pair it with https://render3d.app. Verify Fusion and Render both show connected and the bridge reports ready, authPing, chatEvents, projectChatHistory, activityFeed, and livePreview support. Do not modify any designs. Tell me if Render still needs the Design Chat integration.
+> Install https://github.com/wprojects/STEVE-Render-Studio-Bridge for Autodesk Fusion on this computer. Follow docs/INSTALL_WITH_AI.md in that repository. Download and verify the runtime, preserve any existing STEVE data, enable the add-in, help me sign in, and pair it with https://render3d.app. Verify Fusion and Render both show connected and the bridge reports ready, authPing, chatEvents, projectChatHistory, activityFeed, projectBinding, and livePreview support. Do not modify any designs. Tell me if Render still needs the Design Chat integration.
 
 For a different Render instance, replace `https://render3d.app` with its exact address,
 including a port when needed. You may need to complete sign-in or approve pairing yourself.
@@ -39,9 +39,12 @@ Apple silicon. Check the host platform and that Autodesk Fusion is installed fir
 7. Verify `GET http://127.0.0.1:38173/v1/status` with the configured `Origin` header.
    Required results: `fusionRunning: true`, `providerReady: true`, `connected: true`,
    `ready: true`, `capabilities.chatEvents: true`, `capabilities.projectChatHistory: true`,
-   `capabilities.activityFeed: true`, and `capabilities.livePreview: true`. Confirm Render says **Ready in
+   `capabilities.activityFeed: true`, `capabilities.projectBinding: true`, and `capabilities.livePreview: true`. Confirm Render says **Ready in
    Fusion**. Do not send a modeling prompt just to check the connection.
-8. Tell the user that STEVE uses the active Fusion document when a request starts, and
+8. Confirm the visible STEVE project lock matches the intended Render project ID.
+   Select the project explicitly if the connection is unbound. Browsing another
+   project must not change the lock.
+9. Tell the user that STEVE uses the active Fusion document when a request starts, and
    the current Data Panel project/folder as its default save destination. Open the intended
    document before sending. Normal STEVE restarts preserve pairing. Changing its Render
    address or clearing the browser’s saved key requires pairing again.
@@ -61,7 +64,8 @@ website. Wire the authenticated live feed into Render's Design Chat using:
 - [Dependency-free protocol example](../examples/render-design-chat-client.js)
 
 The dependency-free request client polls at 250 ms. The production background activity
-watcher polls every two seconds across projects and supports cursor/epoch recovery. The production bundle renders replies through the host hooks and keeps
+watcher polls the locked project every two seconds and supports cursor/epoch recovery.
+The production bundle renders replies through the host hooks and keeps
 account/project-scoped history in browser localStorage. The bridge also retains bounded
 public history locally and can recover the latest matching project chat after reconnecting.
 Deploy both the chat wrapper and rendering hooks, then refresh the Render page. A prompt using **Jake** is not routed to STEVE, regardless of its AI model selection.
@@ -80,8 +84,8 @@ add-in. Wire `configureSteveLivePreview` to Render's existing Three scene and ac
 account/project, and use the plain-reference serializer before submitting prompts. See
 [the complete wiring guide](../integrations/render-studio/README.md) and
 [preview protocol](EXTERNAL_BRIDGE.md#live-fusion-viewport-preview). The viewport preview
-is a temporary mesh of the pinned document, independent of saved-file import. It polls
-while Design Chat is open. Refresh Render after deploying changed JavaScript. If Render
+is a temporary mesh of the pinned document, independent of saved-file import. It polls for the locked project independently of Design Chat visibility, and only
+draws when that project is being viewed. Refresh Render after deploying changed JavaScript. If Render
 says to connect first, pair from the browser UI; a green/paired Fusion server alone does
 not prove the current browser still holds its pairing key.
 

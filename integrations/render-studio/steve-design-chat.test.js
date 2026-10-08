@@ -21,13 +21,15 @@ test("submission persists ID before HTTP and pins prompt/project across navigati
   const mutableOwner = { ...owner };
   const integration = {
     connector: { watch: async (id, { onUpdate }) => { onUpdate(complete); return complete; } },
+    prepareSubmission: async () => "revision-a",
     submitCurrent: async packet => {
       assert.equal(chat.records(owner)[0].requestId, "request-1");
-      assert.deepEqual(packet, { prompt: "original prompt", requestId: "request-1", owner });
+      assert.deepEqual(packet, { prompt: "original prompt", requestId: "request-1", bindingRevision: "revision-a", owner });
       await pending; return { requestId: "request-1" };
     },
   };
   const result = chat.submit(integration, { owner: mutableOwner, prompt: "original prompt", requestId: "request-1" });
+  await Promise.resolve();
   mutableOwner.projectId = "project-b";
   release();
   await result;
@@ -73,6 +75,7 @@ test("a lost submit response retains ID for recovery and never resubmits", async
   let submits = 0, watches = 0;
   const chat = new SteveDesignChat({ storage: storage() });
   await assert.rejects(chat.submit({
+    prepareSubmission: async () => "revision-a",
     submitCurrent: async () => { submits++; throw new TypeError("lost response"); },
     connector: { watch: async (id, { onUpdate }) => { watches++; onUpdate(complete); } },
   }, { owner, requestId: "request-1", prompt: "original prompt" }), /lost response/);
@@ -107,6 +110,7 @@ test("quota failure after acceptance retains live reply without failing submissi
   store.setItem = (key, value) => { if (fail) throw new Error("quota"); save(key, value); };
   const chat = new SteveDesignChat({ storage: store });
   const result = await chat.submit({
+    prepareSubmission: async () => "revision-a",
     submitCurrent: async () => { fail = true; return { accepted: true, requestId: "request-1" }; },
     connector: { watch: async (id, { onUpdate }) => onUpdate(complete) },
   }, { owner, prompt: "original prompt", requestId: "request-1" });
@@ -122,7 +126,7 @@ test("initial storage failure blocks submission before HTTP", async () => {
   store.setItem = () => { throw new Error("quota"); };
   let sent = false;
   const chat = new SteveDesignChat({ storage: store });
-  await assert.rejects(chat.submit({ submitCurrent: async () => { sent = true; } },
+  await assert.rejects(chat.submit({ prepareSubmission: async () => "revision-a", submitCurrent: async () => { sent = true; } },
     { owner, prompt: "hello", requestId: "request-1" }), /Cannot save/);
   assert.equal(sent, false);
 });

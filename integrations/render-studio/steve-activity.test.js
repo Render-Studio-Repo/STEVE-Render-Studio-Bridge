@@ -1,8 +1,9 @@
+import { SteveProjectBinding, steveProjectBinding } from './steve-project-binding.js?v=20261008-project-lock-p1';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { SteveActivity, readSteveActivity } from './steve-activity.js';
-import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-steve-auth-ping1';
+import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-project-lock-p1';
 import { SteveDesignChat } from './steve-design-chat.js';
 import { SteveLivePreview } from './steve-live-preview.js';
 
@@ -10,19 +11,19 @@ const snapshot = (requestId = 'request-1', project = 'project-a', text = 'Ready'
   requestId, renderUserId: 'alice', renderProjectId: project, threadId: 'thread-1', phase,
   messages: [{ id: 'reply-1', role: 'assistant', text }],
 });
-const packet = (requests = [], cursor = 1, reset = false, epoch = 'epoch-1') => ({ version: 1, epoch, cursor, reset, requests });
+const packet = (requests = [], cursor = 1, reset = false, epoch = 'epoch-1') => ({ version: 1, binding: { renderUserId: 'alice', renderProjectId: 'project-a', revision: 'revision-a' }, epoch, cursor, reset, requests });
 function fixture() {
   let userId = 'alice', next = packet(), ingested = [];
-  const activity = new SteveActivity({ getUserId: () => userId, read: async () => next, ingest: s => ingested.push(s) });
+  const activity = new SteveActivity({ bindingState: new SteveProjectBinding(), getUserId: () => userId, read: async () => next, ingest: s => ingested.push(s) });
   return { activity, ingested, user: value => userId = value, feed: value => next = value };
 }
 
 test('first snapshot is quiet, chunks deduplicate, only completed unseen replies notify once', async () => {
   const f = fixture(); f.feed(packet([snapshot()])); await f.activity.tick(); assert.equal(f.activity.cards.length, 0);
-  f.feed(packet([snapshot('request-2', 'project-b', 'partial', 'running')], 2)); await f.activity.tick();
-  f.feed(packet([snapshot('request-2', 'project-b', 'partial more', 'running')], 3)); await f.activity.tick();
+  f.feed(packet([snapshot('request-2', 'project-a', 'partial', 'running')], 2)); await f.activity.tick();
+  f.feed(packet([snapshot('request-2', 'project-a', 'partial more', 'running')], 3)); await f.activity.tick();
   assert.equal(f.activity.cards.length, 0);
-  f.feed(packet([snapshot('request-2', 'project-b', 'Final question?')], 4)); await f.activity.tick();
+  f.feed(packet([snapshot('request-2', 'project-a', 'Final question?')], 4)); await f.activity.tick();
   assert.deepEqual(f.activity.cards, [{ requestId: 'request-2', text: 'Final question?' }]);
   await f.activity.tick(); assert.equal(f.activity.cards.length, 1);
   f.activity.dismiss('request-2'); await f.activity.tick(); assert.equal(f.activity.cards.length, 0);
@@ -46,7 +47,7 @@ test('wrong user and moved request project reject whole packet before ingestion'
   await assert.rejects(f.activity.tick(), /owner/); assert.equal(f.ingested.length, 0);
   f.feed(packet([snapshot()], 3)); await f.activity.tick();
   f.feed(packet([snapshot('request-2'), snapshot('request-1', 'wrong-project')], 4));
-  await assert.rejects(f.activity.tick(), /changed project/); assert.equal(f.ingested.length, 1);
+  await assert.rejects(f.activity.tick(), /owner/); assert.equal(f.ingested.length, 1);
 });
 
 test('account switch and dispose discard late responses and clear popup', async () => {
@@ -73,7 +74,7 @@ test('single timer is canceled on disposal and cards stay bounded', async () => 
 test('activity uses exact signed user scope and capability gating, without submissions', async () => {
   const calls = [], store = { read: async () => 'test-secret' };
   const connector = new SteveConnector({ cryptoApi: webcrypto, secretStore: store, fetchFn: async (url, options) => {
-    calls.push({ url, options }); return { ok: true, json: async () => url.endsWith('/status') ? { capabilities: { activityFeed: true } } : packet() };
+    calls.push({ url, options }); return { ok: true, json: async () => url.endsWith('/status') ? { capabilities: { activityFeed: true, projectBinding: true } } : packet() };
   } });
   await readSteveActivity(connector, { renderUserId: 'alice', after: 7 });
   const { url, options } = calls[1]; assert.ok(url.endsWith('/v1/activity'));
@@ -112,7 +113,8 @@ test('visible viewport polls while chat is absent and pagehide disposes timer/li
   try {
     configureSteveLivePreview({ host: { isConnected: true, getClientRects: () => [1] }, getOwner: () => owner,
       THREE: { Group: class { constructor() { this.userData = {}; } traverse() {} } }, scene: { add() {}, remove() {} } });
-    steveDesignChat.ingestActivity(snapshot()); await tick(); assert.equal(requests, 1);
+    steveProjectBinding.accept(packet());
+    steveDesignChat.ingestActivity(snapshot(), { bindingRevision: 'revision-a' }); await tick(); assert.equal(requests, 1);
     owner.projectId = 'project-b'; await tick(); assert.equal(requests, 1);
     events.dispatchEvent(new Event('pagehide')); assert.equal(cleared, 1);
   } finally {
@@ -125,7 +127,7 @@ test('signed activity authentication failures retain pairing and back off subseq
   let posts = 0;
   const connector = new SteveConnector({ cryptoApi: webcrypto, secretStore: { read: async () => 'retained-secret' },
     fetchFn: async (url) => {
-      if (url.endsWith('/status')) return { ok: true, json: async () => ({ capabilities: { activityFeed: true } }) };
+      if (url.endsWith('/status')) return { ok: true, json: async () => ({ capabilities: { activityFeed: true, projectBinding: true } }) };
       posts++; return { ok: false, status: 401, json: async () => ({ error: { code: 'invalid_signature', message: 'denied' } }) };
     } });
   await assert.rejects(readSteveActivity(connector, { renderUserId: 'alice', after: 0 }), /authentication/);

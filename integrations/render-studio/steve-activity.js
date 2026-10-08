@@ -1,4 +1,5 @@
-import { signSteveSubmission } from './steve-connector.js?v=20261008-steve-auth-ping1';
+import { steveProjectBinding, validateSteveBinding, bindingOwns } from './steve-project-binding.js?v=20261008-project-lock-p1';
+import { signSteveSubmission } from './steve-connector.js?v=20261008-project-lock-p1';
 
 export async function readSteveActivity(connector, { renderUserId, after }, signal) {
   if (!renderUserId || !Number.isSafeInteger(after) || after < 0) throw new Error('Invalid STEVE activity scope.');
@@ -6,7 +7,7 @@ export async function readSteveActivity(connector, { renderUserId, after }, sign
   if (!connector.secret) return null;
   const timeout = signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000);
   const status = await connector.request('/status', { method: 'GET', cache: 'no-store', signal: timeout });
-  if (status?.capabilities?.activityFeed !== true) return null;
+  if (status?.capabilities?.activityFeed !== true || status?.capabilities?.projectBinding !== true) return null;
   if (connector.authFailure && Date.now() < connector.authRetryAt) throw connector.authFailure;
   const body = JSON.stringify({ renderUserId, after });
   const requestId = connector.cryptoApi.randomUUID();
@@ -25,9 +26,10 @@ export function validateSteveActivity(packet, userId) {
     || typeof packet.reset !== 'boolean' || !Array.isArray(packet.requests) || packet.requests.length > 64) {
     throw new Error('Invalid STEVE activity feed.');
   }
+  const binding = validateSteveBinding(packet);
   const ids = new Set();
   for (const record of packet.requests) {
-    if (record?.renderUserId !== userId || typeof record.renderProjectId !== 'string' || !record.renderProjectId
+    if (!bindingOwns(binding, { userId: record?.renderUserId, projectId: record?.renderProjectId }) || record?.renderUserId !== userId || typeof record.renderProjectId !== 'string' || !record.renderProjectId
       || !/^[a-zA-Z0-9_-]{8,128}$/.test(record.requestId) || ids.has(record.requestId)
       || !Array.isArray(record.messages) || record.messages.length > 2048) throw new Error('Invalid STEVE activity owner.');
     ids.add(record.requestId);
@@ -47,8 +49,15 @@ const completedReplies = record => record.messages.filter(message => message.rol
 
 export class SteveActivity {
   constructor({ getUserId, read, ingest = () => {}, onChange = () => {}, onAvailability = () => {},
-    schedule = globalThis.setTimeout.bind(globalThis), cancel = globalThis.clearTimeout.bind(globalThis) }) {
+    bindingState = steveProjectBinding, schedule = globalThis.setTimeout.bind(globalThis), cancel = globalThis.clearTimeout.bind(globalThis) }) {
     Object.assign(this, { getUserId, read, ingest, onChange, onAvailability, schedule, cancel });
+    this.bindingState = bindingState;
+    this.unsubscribeBinding = bindingState.subscribe(() => {
+      if (this.bindingGeneration === bindingState.generation) return;
+      this.bindingGeneration = bindingState.generation;
+      this.feedEpoch = ''; this.cursor = 0; this.initialized = false;
+      this.records.clear(); this.seen.clear(); this.cards = []; this.selected = null; this.onChange(this);
+    });
     this.userId = ''; this.feedEpoch = ''; this.cursor = 0; this.initialized = false; this.records = new Map();
     this.seen = new Map(); this.cards = []; this.selected = null; this.epoch = 0; this.timer = null; this.pending = null; this.active = false;
   }
@@ -68,12 +77,16 @@ export class SteveActivity {
     if (String(this.getUserId() || '') !== this.userId) this.reset();
     if (!this.userId || this.pending) return;
     const controller = new AbortController(), epoch = this.epoch, userId = this.userId;
+    const bindingToken = this.bindingState.beginRead(), after = this.cursor;
+    const bindingRevision = this.bindingState.binding?.revision;
     this.pending = controller;
     try {
-      const packet = await this.read({ renderUserId: userId, after: this.cursor }, controller.signal);
+      const packet = await this.read({ renderUserId: userId, after }, controller.signal);
       if (controller.signal.aborted || epoch !== this.epoch || userId !== String(this.getUserId() || '')) return;
       if (!packet) { this.onAvailability(false); return; }
+      if (!this.bindingState.accept(packet, bindingToken)) return;
       validateSteveActivity(packet, userId);
+      if (bindingRevision !== this.bindingState.binding?.revision && after > 0 && !packet.reset) return;
       if (this.feedEpoch && packet.epoch !== this.feedEpoch && this.cursor !== 0) {
         this.feedEpoch = packet.epoch; this.cursor = 0; return;
       }
@@ -97,7 +110,7 @@ export class SteveActivity {
           this.cards.push({ requestId: record.requestId, text: fresh.at(-1).text.slice(0, 240) });
           this.cards = this.cards.slice(-3);
         }
-        this.ingest(record);
+        this.ingest(record, { bindingRevision: this.bindingState.binding.revision, authenticated: true });
       }
       while (this.records.size > 64) {
         const id = this.records.keys().next().value; this.records.delete(id); this.seen.delete(id);
@@ -105,7 +118,9 @@ export class SteveActivity {
       while (this.seen.size > 128) this.seen.delete(this.seen.keys().next().value);
       this.cards = this.cards.filter(card => this.records.has(card.requestId));
       if (!this.records.has(this.selected)) this.selected = null;
-      this.cursor = packet.cursor; this.initialized = true; this.onChange(this);
+      this.cursor = packet.cursor; this.initialized = true;
+      this.bindingState.busy = [...this.records.values()].some(record => !['completed', 'failed', 'stopped', 'cancelled', 'canceled'].includes(record.phase));
+      this.bindingState.emit(); this.onChange(this);
     } finally { if (this.pending === controller) this.pending = null; }
   }
   start() {
@@ -118,6 +133,6 @@ export class SteveActivity {
     void loop();
   }
   dispose() {
-    this.active = false; this.cancel(this.timer); this.timer = null; this.reset();
+    this.active = false; this.cancel(this.timer); this.timer = null; this.unsubscribeBinding(); this.reset();
   }
 }

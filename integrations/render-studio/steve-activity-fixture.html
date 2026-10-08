@@ -1,26 +1,48 @@
-<!doctype html><html lang="en"><meta charset="utf-8"><title>STEVE activity isolation fixture</title>
-<style>body{margin:0;background:#111820;color:#eaf0f5;font:14px system-ui}header{padding:18px}button,input{padding:8px;margin:4px}#viewport{height:calc(100vh - 160px);position:relative;background:linear-gradient(140deg,#233b42,#111820);margin:0 20px;border:1px solid #52626a;border-radius:12px}#context{padding:22px}.sample-model{width:180px;height:120px;border:3px solid #93bdbb;border-radius:20px;position:absolute;left:30%;top:35%;transform:rotate(-15deg);box-shadow:15px 15px #345253}p{margin:8px 0}</style>
-<header><strong>STEVE activity · isolated test data</strong><p>No production bridge requests, submissions, or project writes. Engine selection and chat visibility do not control this feed.</p>
-<button id="reply">Complete background reply</button><button id="chunk">Stream background chunk</button><button id="restart">Restart feed</button><button id="account">Switch account</button><button id="dispose">Dispose</button><input id="draft" placeholder="Draft stays focused"></header>
-<main id="viewport"><div id="context"></div><div class="sample-model" aria-label="Unchanged project A model"></div></main>
+<!doctype html><html lang="en"><meta charset="utf-8"><title>STEVE explicit project lock fixture</title>
+<style>body{margin:0;background:#111820;color:#eaf0f5;font:14px system-ui}header{padding:16px}button,input{padding:8px;margin:4px}#viewport{height:70vh;position:relative;background:#233b42;margin:0 20px;border:1px solid #52626a;border-radius:12px}#context{padding:20px}#log{white-space:pre-wrap;max-width:55%;padding:20px}</style>
+<header><strong>STEVE project lock · synthetic bridge only</strong><p>No real bridge, project writes, or model prompts. Use viewport controls to confirm/cancel a synthetic lock.</p>
+<button id="view-a">View Mount v1 #844cc9ab</button><button id="view-b">View SteveTest #88b644e1</button>
+<button id="send">Test send guard</button><button id="busy">Toggle fake busy</button><button id="external">Other browser changes lock</button>
+<input id="draft" value="Keep this draft in its project" aria-label="Draft"></header>
+<main id="viewport"><div id="context"></div><pre id="log"></pre></main>
 <script type="module">
-import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-steve-activity3';
-const owner={userId:'fixture-alice',projectId:'project-a'};
-let cursor=1,epoch='fixture-epoch-1', ingested=0,opened=[];
-const records=new Map();
-function record(id,project,text,phase='completed'){return {requestId:id,renderUserId:'fixture-alice',renderProjectId:project,threadId:'fixture-thread',phase,messages:[{id:'assistant-1',role:'assistant',text}]};}
-records.set('fixture-old',record('fixture-old','project-a','Historical reply, silently loaded.'));
-const context=document.querySelector('#context');
-function label(){context.textContent=`Visible viewport: ${owner.projectId} · account: ${owner.userId} · engine: Jake · main chat closed`;}
-label();
-const ui=mountSteveActivity({host:document.querySelector('#viewport'),getOwner:()=>owner,projectLabel:id=>id==='project-a'?'Bracket assembly':'Motor mount',
- ingest:()=>ingested++,onAvailability:()=>{},read:async ({renderUserId,after})=>({version:1,epoch,cursor,reset:after===0,requests:renderUserId==='fixture-alice'?[...records.values()]:[]}),
- openProject:async (id,isCurrent)=>{if(isCurrent()){opened.push(id);owner.projectId=id;label();}},});
-async function change(phase,text){cursor++;records.set('fixture-background',record('fixture-background','project-b',text,phase));await ui.activity.tick();}
-document.querySelector('#reply').onclick=()=>change('completed','The motor mount is ready. Should the bolt holes be 5 mm or 6 mm?');
-document.querySelector('#chunk').onclick=()=>change('running','Checking the mounting dimensions…');
-document.querySelector('#restart').onclick=async()=>{epoch='fixture-epoch-'+crypto.randomUUID();await ui.activity.tick();await ui.activity.tick();};
-document.querySelector('#account').onclick=async()=>{owner.userId=owner.userId==='fixture-alice'?'fixture-bob':'fixture-alice';ui.activity.reset();await ui.activity.tick();label();};
-document.querySelector('#dispose').onclick=()=>ui.dispose();
-window.fixture={ui,owner,opened,change,get ingested(){return ingested;}};
+import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-project-lock-p1';
+import { SteveProjectBinding, bindingError } from './steve-project-binding.js?v=20261008-project-lock-p1';
+import { SteveDesignChat } from './steve-design-chat.js?v=20261008-project-lock-p1';
+const owner={userId:'fixture-alice',projectId:'844cc9ab'}, projects=[{id:'844cc9ab',name:'Mount v1'},{id:'88b644e1',name:'SteveTest'}];
+const bindingState=new SteveProjectBinding(), calls=[], opened=[], values=new Map();
+let binding={renderUserId:owner.userId,renderProjectId:owner.projectId,revision:'fixture-1'}, busy=false, sequence=1, submissions=0;
+const chat=new SteveDesignChat({storage:{get length(){return values.size},key:i=>[...values.keys()][i],getItem:k=>values.get(k),setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)}});
+const connector={status:{busy:false},project:async packet=>{
+ calls.push({...packet});connector.status.busy=busy;
+ if(packet.action==='bind'){
+  if(busy)throw bindingError('project_busy');
+  if(packet.expectedRevision!==(binding?.revision??null))throw bindingError('project_binding_changed');
+  binding={renderUserId:packet.renderUserId,renderProjectId:packet.renderProjectId,revision:'fixture-'+(++sequence)};
+ }
+ return {version:1,binding};
+}};
+function render(){document.querySelector('#context').textContent='Viewing '+projects.find(p=>p.id===owner.projectId).name+' #'+owner.projectId;
+ document.querySelector('#log').textContent=JSON.stringify({binding,busy,bindWrites:calls.filter(c=>c.action==='bind'),submissions,historyRows:values.size},null,2);}
+function view(id){owner.projectId=id;window.dispatchEvent(new Event('render3d:project-changed'));render();}
+const ui=mountSteveActivity({host:document.querySelector('#viewport'),getOwner:()=>owner,getProjects:()=>projects,
+ projectLabel:id=>projects.find(p=>p.id===id)?.name||id,bindingState,projectConnector:connector,
+ read:async()=>({version:1,binding,epoch:binding?.revision||'unbound',cursor:sequence,reset:true,
+ requests:binding?[{requestId:'fixture-request',renderUserId:binding.renderUserId,renderProjectId:binding.renderProjectId,
+ phase:busy?'running':'completed',messages:[{id:'reply',role:'assistant',text:'Synthetic history'}]}]:[]}),
+ ingest:()=>render(),onAvailability:()=>{},openProject:async(id,isCurrent)=>{if(isCurrent()){opened.push(id);view(id);}}});
+bindingState.subscribe(render);
+document.querySelector('#view-a').onclick=()=>view('844cc9ab');
+document.querySelector('#view-b').onclick=()=>view('88b644e1');
+document.querySelector('#send').onclick=async()=>{
+ try{await chat.submit({prepareSubmission:async target=>{await bindingState.refresh(connector);return bindingState.assertOwner(target)},
+ submitCurrent:async()=>{submissions++;return {accepted:true}},connector:{watch:async()=>{}}},
+ {owner,prompt:document.querySelector('#draft').value,requestId:crypto.randomUUID()});}
+ catch(error){document.querySelector('#context').textContent=error.message;}
+ render();
+};
+document.querySelector('#busy').onclick=async()=>{busy=!busy;connector.status.busy=busy;await ui.activity.tick();render();};
+document.querySelector('#external').onclick=async()=>{binding={...binding,renderProjectId:binding.renderProjectId==='844cc9ab'?'88b644e1':'844cc9ab',revision:'fixture-'+(++sequence)};await ui.activity.tick();render();};
+window.fixture={ui,owner,opened,calls,bindingState,view,get binding(){return binding},get submissions(){return submissions}};
+render();
 </script></html>

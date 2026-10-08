@@ -1,3 +1,4 @@
+import { steveProjectBinding, bindingError } from './steve-project-binding.js?v=20261008-project-lock-p1';
 import { watchSteveChat } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 const DEFAULT_BASE_URL = "http://127.0.0.1:38173";
 const API_VERSION = "/v1";
@@ -262,7 +263,7 @@ export class SteveConnector {
   async request(path, options = {}) {
     if (!this.fetchFn) throw new TypeError("Fetch is unavailable.");
     const signed = Boolean(options.headers?.["X-Steve-Signature"]);
-    const recoveryRead = path === "/events" || path === "/preview" || path === "/ping";
+    const recoveryRead = path === "/events" || path === "/preview" || path === "/ping" || path === "/project" || path === "/activity";
     if (signed && recoveryRead && this.authFailure && Date.now() < this.authRetryAt) throw this.authFailure;
     const response = await this.fetchFn(`${this.baseUrl}${API_VERSION}${path}`, options);
     const body = await readJson(response);
@@ -484,18 +485,37 @@ export class SteveConnector {
     }
   }
 
-  async submit({ prompt, projectId, folderId, renderProjectId, renderUserId, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
+  async project(payload = { action: 'get' }) {
+    await this.refreshSecret();
+    if (!this.secret) throw new Error('Connect Render Studio to STEVE first.');
+    if (this.authFailure && Date.now() < this.authRetryAt) throw this.authFailure;
+    const status = await this.request('/status', { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(15000) });
+    this.status = status;
+    if (status?.capabilities?.projectBinding !== true) throw bindingError('project_binding_unavailable');
+    const body = JSON.stringify(payload);
+    const requestId = this.cryptoApi.randomUUID(), timestamp = String(Math.floor(Date.now() / 1000)), nonce = randomNonce(this.cryptoApi);
+    const signature = await signSteveSubmission({ secret: this.secret, body, requestId, timestamp, nonce,
+      cryptoApi: this.cryptoApi, path: '/v1/project' });
+    return this.request('/project', { method: 'POST', body, signal: AbortSignal.timeout(15000),
+      headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId,
+        'X-Steve-Timestamp': timestamp, 'X-Steve-Nonce': nonce, 'X-Steve-Signature': signature } });
+  }
+
+  async prepareSubmission(owner, bindingRevision) {
+    await steveProjectBinding.refresh(this);
+    return steveProjectBinding.assertOwner(owner, bindingRevision);
+  }
+
+  async submit({ prompt, projectId, folderId, renderProjectId, renderUserId, bindingRevision, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
     const cleanPrompt = String(prompt || "").trim();
     if (!cleanPrompt) throw new Error("Enter a CAD prompt before sending to STEVE.");
     await this.refreshSecret();
     if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
     if (this.state !== "ready") throw new Error(STEVE_STATE_VIEW[this.state].recovery);
-    if (Boolean(renderProjectId) !== Boolean(renderUserId)) throw new Error("Both Render project and user IDs are required.");
-    const payload = { prompt: cleanPrompt };
-    if (renderProjectId && renderUserId) {
-      payload.renderProjectId = String(renderProjectId);
-      payload.renderUserId = String(renderUserId);
-    }
+    if (!renderProjectId || !renderUserId) throw new Error("Both Render project and user IDs are required.");
+    const revision = await this.prepareSubmission({ userId: renderUserId, projectId: renderProjectId }, bindingRevision);
+    const payload = { prompt: cleanPrompt, renderProjectId: String(renderProjectId), renderUserId: String(renderUserId),
+      bindingRevision: revision };
     if (projectId) payload.projectId = String(projectId);
     if (folderId) payload.folderId = String(folderId);
     const cleanName = normalizeDesignName(designName);
@@ -742,12 +762,15 @@ export function mountSteveConnector({
       connector.deactivate();
       return connector.snapshot();
     },
-    async submitCurrent({ prompt = getPrompt(), requestId, owner } = {}) {
+    prepareSubmission: owner => connector.prepareSubmission(owner),
+    async submitCurrent({ prompt = getPrompt(), requestId, owner, bindingRevision } = {}) {
+      steveProjectBinding.assertOwner(owner, bindingRevision);
       const result = await connector.submit({
         prompt,
         requestId,
         renderProjectId: owner?.projectId,
         renderUserId: owner?.userId,
+        bindingRevision,
         designName: designName?.value || suggestedDesignName(prompt),
       });
       setPromptStatus("ok", result.message || "Prompt sent to STEVE in Fusion.");

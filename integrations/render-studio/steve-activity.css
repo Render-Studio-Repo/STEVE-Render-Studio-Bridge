@@ -8,3 +8,10 @@
 .steve-activity-feed p { display:grid; gap:4px; white-space:pre-wrap; padding:8px; border-radius:6px; background:#8881; }
 .steve-activity-chat > p { color:var(--muted,#a9b9ae); font-size:12px; }
 .steve-activity-cards { max-height:35vh; overflow:auto; }
+.steve-project-lock { pointer-events:auto; padding:8px 10px; border:1px solid var(--border,#546458); border-radius:9px; background:var(--panel,#15231d); overflow-wrap:anywhere; }
+.steve-project-lock strong { display:block; font-size:12px; }
+.steve-project-lock select { max-width:100%; margin-top:6px; color:var(--text,#eef2f6); background:var(--panel,#15231d); border:1px solid var(--border,#546458); border-radius:5px; padding:4px; }
+.steve-project-lock p { margin:6px 0 0; font-size:12px; }
+.steve-project-lock p:empty { display:none; }
+.steve-project-lock button { padding:4px 6px; font-size:11px; }
+.steve-project-lock button:disabled { opacity:.5; cursor:default; }

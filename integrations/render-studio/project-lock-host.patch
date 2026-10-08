@@ -1,0 +1,101 @@
+--- a/frontend/studio/app.js
++++ b/frontend/studio/app.js
+@@ -1,5 +1,5 @@
+ import { serializeStevePrompt } from "../cad/steve-prompt-text.js?v=20261008-steve-links3";
+-import { configureSteveActivity, configureSteveLivePreview, configureSteveHistorySync, configureSteveResultOpening, steveDesignChat, steveProjectRun } from "../cad/steve-design-chat.js?v=20261008-steve-shell1&fusion-units=20261008-1";
++import { configureSteveActivity, configureSteveLivePreview, configureSteveHistorySync, configureSteveResultOpening, steveDesignChat, steveProjectRun } from "../cad/steve-design-chat.js?v=20261008-project-lock-p1";
+ import { mountDesignGoal, getDesignGoal, setDesignGoal } from "../components/design-goal.js?v=20261007-concise-goal-3";
+ import { DEFAULT_AI_MODEL, ASTRA_MODEL_OPTIONS } from "../components/ai-model-defaults.js?v=astra-default1&astraoffice=20260917-1&gpt61sol=20261001-1";
+ import { loadModelReasoning, modelReasoningOptions, modelReasoningOptionsHTML, modelReasoningRequestField, storeModelReasoning } from "../components/model-reasoning.js?v=20261001-1";
+@@ -207,7 +207,7 @@
+ import { bakeMeshAnimationClips, meshHasExportableAnimation } from "../scripting/mesh-animation-bake.js?v=20261001-animation-integrity";
+ import { createObjectHistoryUI } from "../components/object-history.js?v=20260909-drivehist1";
+ import { createWorkspaceActivityUI } from "../workspace/workspace-activity.js?v=20260907-public-live";
+-import { createWorkspaceBrowser, projectsInCurrentWorkspace } from "../workspace/workspace-browser.js?v=20260923-draw-recordings1&vrrobot=20260927-2&design-readable=20260927-4&generation-elapsed=20260930-1&filmapply=20261006-2&shared-projects=20261007-1&spatial-intent=20261008-1&dual-unpin=20261008-1&steve-project-badge=20261008-1";
++import { createWorkspaceBrowser, projectsInCurrentWorkspace } from "../workspace/workspace-browser.js?v=20260923-draw-recordings1&vrrobot=20260927-2&design-readable=20260927-4&generation-elapsed=20260930-1&filmapply=20261006-2&shared-projects=20261007-1&spatial-intent=20261008-1&dual-unpin=20261008-1&steve-project-badge=20261008-1&steve-project-lock=20261008-1";
+ import {
+   consumeOnlineModelsReturn,
+   peekOnlineModelsReturn,
+@@ -317,7 +317,7 @@
+ import { createStorePreferencesUI } from "../marketplace/store-preferences.js?v=20260908-store-ux-storepop1-proftabs1&leakfix72";
+ import { openStoreListingPopup } from "../marketplace/store-listing-popup.js?v=20260909-storepop1";
+ import { createWorkspaceManagementUI } from "../workspace/workspace-management.js?v=20260826-mgmt-dash&leakfix54";
+-import { createRenderAgent } from "../components/render-agent.js?v=20261008-steve-stable-chat2&steve-preview=20261008-1&steve-auth-resume=20261008-1&design-chat-preflight=20261008-2&steve-reconnect=20261008-1&steve-visible-recovery=20261008-1&steve-auth-probe=20261008-1&steve-auth-ping=20261008-1&steve-owner-lock=20261008-1&design-chat-scroll=20261008-1&steve-direct-chat=20261008-1&steve-activity=20261008-3&steve-live-sync=20261008-1&steve-notifications=20261008-1&steve-shell=20261008-1";
++import { createRenderAgent } from "../components/render-agent.js?v=20261008-steve-stable-chat2&steve-preview=20261008-1&steve-auth-resume=20261008-1&design-chat-preflight=20261008-2&steve-reconnect=20261008-1&steve-visible-recovery=20261008-1&steve-auth-probe=20261008-1&steve-auth-ping=20261008-1&steve-owner-lock=20261008-1&design-chat-scroll=20261008-1&steve-direct-chat=20261008-1&steve-activity=20261008-3&steve-live-sync=20261008-1&steve-notifications=20261008-1&steve-shell=20261008-1&steve-project-lock=20261008-1";
+ import { createCollab } from "../social/collab.js?v=20260907-xr-avatar2-20260916-vrsharemesh1&editctx=20260915-1&editscale=20260915-1&cvinvite=20260916-1";
+ import { createRibbon } from "./ribbon.js?v=20260928-top-toolbar-trim1";
+ import {
+@@ -381,7 +381,7 @@
+ import { createWorktopViewer } from "./worktop-viewer.js?v=worktop1";
+ import { createPtyViewer } from "./pty-viewer.js?v=pty1";
+ import { initOnshapePanel } from "../cad/onshape-panel.js?v=20260908-cad-thumbs1-switchfast1&leakfix24&leakfix62&leakfix90";
+-import { initFusionPanel } from "../cad/fusion-panel.js?v=20261008-steve-project-destinations1";
++import { initFusionPanel } from "../cad/fusion-panel.js?v=20261008-steve-project-destinations1&steve-project-lock=20261008-1";
+ import { formatLength, formatArea, initUnitSwitcher, mmPerModelUnit, onUnitsChanged, getUnits, setUnits, UNIT_OPTIONS, MEASURE_UNIT_OPTIONS } from "./units.js?v=20260908-units-bar";
+ import { createGizmoPanel } from "../viewport/gizmo-panel.js?v=20260908-xf-dup-rscale1-keymap1-fcplace1-fcdoc1-20260914-ttrans2-20260915-measure1-rig1";
+ import { createAssemblyMotion } from "../viewport/assembly-motion.js?v=20260915-nativejoints1-jointwin1";
+@@ -409,7 +409,7 @@
+ } from "../viewport/viewport-object-delete.js?v=20260908-delete1-fcdoc1";
+ import { createFeatureEditor } from "../components/feature-editor.js?v=20260610-direct";
+ import { fetchCadParams, cadParamControlsHtml, bindCadParamControls } from "../components/text-to-cad-params.js?v=20260720-param-bake";
+-import { createProjectTree, isViewportBrowserPointerTarget, browserDiskFilename, isBrowserDirectDownloadEntry, browserEntryIsVideo } from "../components/project-tree.js?v=20260923-draw-recordings1&vrrobot=20260927-2&design-readable=20260927-4&filmapply=20261006-2&spatial-intent=20261008-1";
++import { createProjectTree, isViewportBrowserPointerTarget, browserDiskFilename, isBrowserDirectDownloadEntry, browserEntryIsVideo } from "../components/project-tree.js?v=20260923-draw-recordings1&vrrobot=20260927-2&design-readable=20260927-4&filmapply=20261006-2&spatial-intent=20261008-1&steve-project-lock=20261008-1";
+ import {
+   saveSessionSnapshot,
+   clearPendingRestore,
+@@ -15954,6 +15954,7 @@
+   host: document.getElementById("viewport"),
+   getOwner: () => ({ userId: String(currentUser?.id || ""), projectId: String(projectId || "") }),
+   projectLabel: id => allProjects?.find(project => String(project.id) === id)?.name || id,
++  getProjects: () => allProjects || [],
+   openProject: (id, isCurrent) => isCurrent() ? openProjectById(id) : Promise.resolve(),
+ });
+ configureSteveLivePreview({
+@@ -15983,7 +15984,7 @@
+ let steveIntegrationPromise = null;
+ function getSteveIntegration() {
+   if (!steveIntegrationPromise) {
+-    steveIntegrationPromise = import("../cad/steve-design-chat.js?v=20261008-steve-shell1").then((mod) => mod.mountSteveDesignChat({
++    steveIntegrationPromise = import("../cad/steve-design-chat.js?v=20261008-project-lock-p1").then((mod) => mod.mountSteveDesignChat({
+       getPrompt: () => composer?.getPromptText?.() || "",
+       getFusionStatus: () => api("/api/autodesk/status"),
+       connectFusion: () => document.getElementById("btn-fusion-connect")?.click(),
+@@ -36821,10 +36822,10 @@
+   isProjectLoading: (id) => loadingProjectIds.has(id),
+   isProjectGenerating: (id) => isProjectGenerating(id),
+   isProjectNew: (id) => newlyCompletedProjects.has(id),
+-  getSteveProjectRun: (id) => steveProjectRun(steveDesignChat.records({
++  getSteveProjectRun: (id) => steveDesignChat.projectRun({
+     userId: String(currentUser?.id || ""),
+     projectId: String(id || ""),
+-  })),
++  }),
+   getVideoEditReady: (id) => readyVideoEdits.get(id) || null,
+   onOpenProject: (id) => openProjectById(id),
+   onRenameProject: (p) => renameProject(p),
+@@ -39482,7 +39483,7 @@
+     }
+   },
+ });
+-const openRobotRecordingExplorer = () => import('./robotics-data-explorer.js?v=20260923-openarm-workspace1&agent-handoff=20260923-1&vrrobot=20260927-2&design-readable=20260927-4')
++const openRobotRecordingExplorer = () => import('./robotics-data-explorer.js?v=20260923-openarm-workspace1&agent-handoff=20260923-1&vrrobot=20260927-2&design-readable=20260927-4&steve-project-lock=20261008-1')
+   .then(module => module.openRoboticsDataExplorer({
+     getProjectId: () => projectId,
+     onOpenFolder: (folder) => openProjectCodeEditor({ folder, title: "Robotics Project Explorer", tabLabel: "Robotics Files" }),
+--- a/frontend/components/render-agent.js
++++ b/frontend/components/render-agent.js
+@@ -1,4 +1,4 @@
+-import { steveDesignChat, mountSteveReplyRecovery, mountSteveSavedResult } from "../cad/steve-design-chat.js?v=20261008-steve-shell1";
++import { steveDesignChat, mountSteveReplyRecovery, mountSteveSavedResult } from "../cad/steve-design-chat.js?v=20261008-project-lock-p1";
+ import { reconcileDesignChatFeed } from "./design-chat-feed-reconcile.js?v=20261008-steve-stable-feed1";
+ import { mountDesignGoal, getDesignGoal } from "./design-goal.js?v=20261007-concise-goal-3";
+ import { mountDesignReview } from "./design-review.js?v=20261008-design-review-3";
+@@ -20,7 +20,7 @@
+ import { isVrHeadsetBrowser } from "../xr/vr-browser.js?v=20260907-desk-boot-acctovl1-acctui1";
+ import { stripOuterPromptQuotes } from "./prompt-ref.js?v=20260908-quotes1&gpt61sol=20261001-1";
+ import { isAdminUser } from "../studio/auth.js?v=20260908-profclick1-profopen1-acctfly1-dimospf1-acctovl1-setsearch1-acctui1";
+-import { isMarketplaceSearchQuestion, openMarketplaceDiscovery } from "../marketplace/marketplace-discovery.js?v=20260928-hey-ai-summary1";
++import { isMarketplaceSearchQuestion, openMarketplaceDiscovery } from "../marketplace/marketplace-discovery.js?v=20260928-hey-ai-summary1&steve-project-lock=20261008-1";
+ import { parseAuthorizedAgents, agentsTabMarkup, parseAgentChat, agentChatMarkup, agentChatPostBody, RA_AGENT_CHAT_FEED, renderAgentTabView, selectedThreadRefreshId } from "./render-agent-agents-tab.js?v=20260923-harness-chat1";
+ import { bindVoiceAgentControls, loadVoiceAgentPrefs, voiceCatalog } from "./voice-agent-roster.js?v=va1";
+ import { analyzeCadQuality, cadQualityWatchdogPacket } from "./cad-quality-check.js?v=cadq2";

@@ -22,6 +22,46 @@ The default destination for new documents is the current Fusion Data Panel proje
 
 The completion endpoint returns the secret once. STEVE saves the approved key in an origin-bound, owner-only `render-pairing.json` file and restores it after normal restarts. Render keeps its matching key in IndexedDB. Changing the Render address revokes the saved pairing; clearing browser storage requires a new approval. Signed `POST /v1/ping` with `{}` verifies the key without submitting modeling work when `capabilities.authPing` is true.
 
+## Lock STEVE to one Render project
+
+Pairing permits a Render origin to authenticate. A separate project binding selects
+one Render account and project for that paired bridge. `capabilities.projectBinding`
+advertises this contract. Switching browser tabs, changing the visible Render project,
+or rotating the pairing key does not change the binding.
+
+Signed `POST /v1/project` with `{"action":"get"}` returns
+`{version:1,binding:null}` or a binding containing `renderUserId`, `renderProjectId`,
+and `revision`. Render displays the bound project name and ID even when the user
+views another project.
+
+An explicit project-selection confirmation sends:
+
+```json
+{
+  "action": "bind",
+  "renderUserId": "Render account ID",
+  "renderProjectId": "Render project ID",
+  "expectedRevision": null
+}
+```
+
+`expectedRevision:null` selects a project only while unbound. To change an existing
+binding, supply its current revision. A stale revision fails instead of overwriting
+another tab's selection. A same-project request with the matching revision is a no-op.
+Binding changes are blocked while STEVE has active, queued, dispatched, or saving work.
+The client must not retry a rejected change with a fresh revision without renewed
+user intent.
+
+The origin-bound `render-project.json` file persists the binding across restarts.
+Malformed saved state fails closed. First-time migration can retain an existing
+association only when all retained owned requests identify one account/project pair.
+Changing the configured Render origin revokes that association.
+
+Submissions require the bound account, project, and `bindingRevision`. Requests,
+model previews, and background activity must also belong to the binding. Retained
+history is not reassigned when a user changes the lock. The Autodesk save destination
+uses separate `projectId` and `folderId` fields and does not select the Render project.
+
 ## Sign a submission
 
 Send `POST /v1/submissions` with these headers:
@@ -49,6 +89,9 @@ The JSON body has this shape:
 ```json
 {
   "prompt": "Create a mounting bracket with two 5 mm holes.",
+  "renderUserId": "bound Render account ID",
+  "renderProjectId": "bound Render project ID",
+  "bindingRevision": "current binding revision",
   "projectId": "optional Autodesk project ID",
   "folderId": "optional Autodesk folder ID",
   "designName": "optional design name"
@@ -174,22 +217,23 @@ are not exposed. Tool names/status and user-visible assistant text are included.
 credential patterns are redacted, but design chat still contains the user's design data.
 The copy-debug-log feature remains connection-only.
 
-### Background activity across projects (capabilities.activityFeed)
+### Background activity for the locked project (capabilities.activityFeed)
 
 Signed `POST /v1/activity` accepts exactly
 `{"renderUserId":"<current Render account>","after":0}`. It returns
-`{version:1,cursor,epoch,reset,requests}`. Each entry in `requests` is a full public
+`{version:1,cursor,epoch,reset,requests,binding}`. Each entry in `requests` is a full public
 request snapshot with its original `requestId`, `renderUserId`, `renderProjectId`,
-and messages. Results are filtered to that owner across projects; unowned legacy
-requests are excluded. This is a read-only endpoint and never starts modeling work.
+and messages. Results are filtered to the bound account and project. Unbound or
+other-account activity returns no requests; unowned legacy requests are excluded. This is a read-only endpoint and never starts modeling work.
 
 Start with `after:0`, then send the returned cursor to receive changed requests.
 A cursor gap returns a full reset. Compare `epoch` on every response and fetch
 `after:0` if it changes: a restarted bridge can reach an old numeric cursor before
-the browser polls again. Retention is bounded to 64 requests and a 7.5 MB aggregate
+the browser polls again. The epoch also includes the binding revision. Clear live
+records, notifications, and previews immediately when that binding changes. Retention is bounded to 64 requests and a 7.5 MB aggregate
 transcript budget. A truncated snapshot reports `transcriptTruncated`.
 
-Mount one account-scoped activity watcher at application startup, independently of
+Mount one binding-aware activity watcher at application startup, independently of
 the selected CAD engine or whether Design Chat is open. Use the initial snapshot
 as a quiet baseline, upsert subsequent snapshots by request ID, and deduplicate
 notifications by request/message identity. Reset account state on sign-out/account
@@ -205,10 +249,13 @@ originating project match the active viewport, checking again after awaited work
 A dependency-free browser implementation is in `examples/render-design-chat-client.js`.
 
 1. Keep **STEVE** as an explicit CAD engine. Jake prompts do not go to Fusion.
-2. On Send, allocate a stable submission UUID and associate it locally with the Render
-   project, Design Chat conversation, and prompt/trace IDs. Autodesk `projectId` is a
-   Fusion save destination, not the Render project ID.
-3. Reuse the existing pairing secret. Call `submit(uuid, {prompt, designName, ...})`.
+2. On Send, capture the composer owner and read the authenticated project binding.
+   Reject a different owner before recording a pending message. Then allocate a stable
+   submission UUID and associate it locally with the Render project, Design Chat
+   conversation, and prompt/trace IDs. Autodesk `projectId` is a Fusion save destination,
+   not the Render project ID.
+3. Reuse the existing pairing secret. Call `submit(uuid, {prompt, designName,
+   renderUserId, renderProjectId, bindingRevision, ...})` with the checked binding.
    A lost response can be retried with the same UUID and exact payload, never a new ID.
 4. Call `watch(uuid, {onUpdate, onConnection, signal})` after HTTP 202 (or an idempotent
    HTTP 200). Put each snapshot into the matching Design Chat conversation. Key messages
@@ -234,7 +281,16 @@ import { createSteveChatClient } from './render-design-chat-client.js';
 const client = createSteveChatClient({ secret: existingPairingSecret });
 const submissionId = crypto.randomUUID();
 // Store submissionId -> current Render project/conversation/prompt locally before sending.
-await client.submit(submissionId, { prompt: draftText, designName });
+const { binding } = await client.project({ action: 'get' });
+if (!binding || binding.renderUserId !== currentUserId || binding.renderProjectId !== currentProjectId) {
+  throw new Error('Open the locked project or explicitly change the STEVE project lock first.');
+}
+await client.submit(submissionId, {
+  prompt: draftText, designName,
+  renderUserId: binding.renderUserId,
+  renderProjectId: binding.renderProjectId,
+  bindingRevision: binding.revision,
+});
 await client.watch(submissionId, {
   signal: abortController.signal,
   onUpdate: snapshot => updateDesignChatForSubmission(submissionId, snapshot),
@@ -381,7 +437,7 @@ account signed into the running Fusion application.
 
 ## Durable Render chat association
 
-Submissions may include `renderProjectId` and `renderUserId` together. These refer to
+Submissions require `renderProjectId`, `renderUserId`, and `bindingRevision`. The IDs refer to
 Render's project and authenticated user, not the Autodesk `projectId`/`folderId`.
 On bridges advertising `projectChatHistory`, signed `POST /v1/events` accepts either
 `{requestId, after}` or `{renderProjectId, renderUserId, after: 0}`. The latter returns
@@ -396,8 +452,8 @@ with mode 0600 and a bounded size. No account tokens or hidden reasoning are inc
 Running records restored after restart become stopped until their conversation is
 reopened. A different conversation never inherits an earlier project's association.
 Changing the configured Render origin clears these histories. Legacy requests without
-Render scope still support explicit request-ID recovery; they cannot be guessed into
-a project automatically.
+Render scope cannot bypass the binding through request-ID recovery. They cannot be
+guessed into a project automatically.
 
 ## Live Fusion viewport preview
 

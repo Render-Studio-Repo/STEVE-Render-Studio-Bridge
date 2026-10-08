@@ -23,6 +23,7 @@ export function createSteveChatClient({secret, baseUrl = 'http://127.0.0.1:38173
   }
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   return {
+    project: (payload, signal) => signedPost('/v1/project', payload, undefined, signal),
     async storage(payload, {requestId = crypto.randomUUID(), signal} = {}) {
       let result = await signedPost('/v1/storage', payload, requestId, signal);
       const deadline = Date.now() + (payload.action === 'chooseFolder' ? 600000 : 30000);

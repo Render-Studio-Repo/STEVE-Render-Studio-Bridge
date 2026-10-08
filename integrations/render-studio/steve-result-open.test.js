@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { SteveResultOpener, savedSteveResult } from "./steve-result-open.js";
 
 function record() {
-  return { requestId: "request-1", userId: "user-a", projectId: "render-a",
+  return { requestId: "request-1", userId: "user-a", projectId: "render-a", bindingRevision: "revision-a",
     resultOpen: { intent: "auto", state: "pending" },
     snapshot: { phase: "completed", save: { state: "saved",
       file: { id: "fusion-file", name: "Motor mount" }, folder: { id: "fusion-folder" }, project: { id: "fusion-project" } } } };
@@ -11,12 +11,14 @@ function record() {
 function fixture(options = {}) {
   let owner = { userId: "user-a", projectId: "render-a" };
   let stored = null;
+  let bindingState = { generation: 1, binding: { renderUserId: "user-a", renderProjectId: "render-a", revision: "revision-a" } };
   const requests = [], displayed = [], states = [];
   const opener = new SteveResultOpener({
     getOwner: () => owner,
+    getBindingState: () => bindingState,
     readRecord: () => structuredClone(stored),
     persist: value => { states.push(value.resultOpen.state); stored = structuredClone(value); options.persist?.(value); },
-    lock: async (key, run) => run(),
+    lock: options.lock || (async (key, run) => run()),
     api: async (path, init) => {
       requests.push({ path, body: init?.body && JSON.parse(init.body) });
       if (options.api) return options.api(path, init);
@@ -28,7 +30,7 @@ function fixture(options = {}) {
     },
     openFile: async (result, guard) => { displayed.push(result); return options.openFile ? options.openFile(result, guard) : true; },
   });
-  return { opener, requests, displayed, states, setOwner: next => { owner = next; }, saved: () => stored };
+  return { opener, requests, displayed, states, setBinding: (projectId, revision) => { bindingState = { generation: bindingState.generation + 1, binding: { renderUserId: "user-a", renderProjectId: projectId, revision } }; }, setOwner: next => { owner = next; }, saved: () => stored };
 }
 
 test("saved result uses exact Fusion identity, imports into original Render project and opens returned file", async () => {
@@ -170,7 +172,7 @@ test("two tab coordinators serialize one persisted import claim", async () => {
     tail = result.catch(() => {});
     return result;
   };
-  const options = { lock, getOwner: () => ({ userId: "user-a", projectId: "render-a" }),
+  const options = { getBindingState: () => ({ generation: 1, binding: { renderUserId: "user-a", renderProjectId: "render-a", revision: "revision-a" } }), lock, getOwner: () => ({ userId: "user-a", projectId: "render-a" }),
     persist: value => { stored = structuredClone(value); }, readRecord: () => structuredClone(stored),
     openFile: async () => true,
     api: async path => {
@@ -202,4 +204,41 @@ test("same-name Fusion project never substitutes for the saved project ID", asyn
   await f.opener.observe(r);
   assert.equal(f.requests.filter(call => call.body).length, 0);
   assert.equal(r.resultOpen.state, "manual");
+});
+
+test('automatic old-A completion while native is bound B cannot import, but explicit manual history can', async () => {
+  const f = fixture(); f.setBinding('render-b', 'revision-b');
+  const r = record(); await f.opener.observe(r);
+  assert.deepEqual(f.requests, []); assert.deepEqual(f.displayed, []);
+  await f.opener.open(r, { manual: true });
+  assert.equal(f.requests.filter(call => call.body).length, 1);
+  assert.equal(f.displayed.length, 1);
+});
+
+for (const boundary of ['lock', 'hubs', 'projects', 'claim', 'import', 'display']) {
+  test('automatic result stays fenced across binding A-B-A at ' + boundary, async () => {
+    let f;
+    const change = () => { f.setBinding('render-b', 'revision-b'); f.setBinding('render-a', 'revision-a2'); };
+    f = fixture({
+      lock: async (key, run) => { if (boundary === 'lock') change(); return run(); },
+      persist: r => { if (boundary === 'claim' && r.resultOpen.state === 'importing') change(); },
+      api: async path => {
+        if (path.endsWith('/hubs')) { if (boundary === 'hubs') change(); return { hubs: [{ id: 'hub' }] }; }
+        if (path.endsWith('/projects')) { if (boundary === 'projects') change(); return { projects: [{ id: 'fusion-project' }] }; }
+        if (boundary === 'import') change();
+        return { project_id: 'render-a', filename: 'result.glb' };
+      },
+      openFile: async (result, guard) => { if (boundary === 'display') change(); assert.equal(guard(), boundary !== 'display'); return guard(); },
+    });
+    const r = record(); await f.opener.observe(r);
+    const imports = f.requests.filter(call => call.body).length;
+    assert.equal(imports, ['import', 'display'].includes(boundary) ? 1 : 0);
+    assert.equal(f.displayed.length, boundary === 'display' ? 1 : 0);
+    assert.notEqual(r.resultOpen.state, 'opened');
+  });
+}
+
+test('automatic opening without original binding revision is denied', async () => {
+  const f = fixture(), r = record(); delete r.bindingRevision;
+  await f.opener.observe(r); assert.deepEqual(f.requests, []);
 });
