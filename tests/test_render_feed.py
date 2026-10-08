@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import unittest
+import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'addin/STEVE'))
 from steve.render_feed import RenderFeed
 
@@ -48,5 +49,32 @@ class RenderFeedTests(unittest.TestCase):
         self.feed.fail('render-1','The document is closed')
         self.assertEqual(self.feed.read('render-1',0)['snapshot']['phase'],'failed')
         self.assertNotIn('document is closed',str(self.feed.read('render-2',0)))
+
+    def test_project_history_survives_restart_and_is_scoped_to_owner(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'history.json'
+            feed = RenderFeed(path)
+            feed.accept('a', 'Build mount', 'project-a', 'alice')
+            feed.observe({'bridgeRequestId': 'a', 'threadId': 'thread-a', 'provider': 'chatgpt',
+                'busy': True, 'bridgeMessageStart': 0, 'bridgeMessages': [
+                    {'role': 'user', 'text': 'INTERNAL'}, {'role': 'assistant', 'text': 'Working'}]})
+            feed.flush()
+            restored = RenderFeed(path)
+            self.assertEqual(restored.latest('project-a', 'alice')['snapshot']['threadId'], 'thread-a')
+            self.assertEqual(restored.latest('project-a', 'alice')['snapshot']['phase'], 'stopped')
+            for project, user in [('project-a', 'bob'), ('project-b', 'alice')]:
+                with self.assertRaises(KeyError): restored.latest(project, user)
+            restored.observe({'threadId': 'thread-a', 'provider': 'chatgpt', 'busy': False,
+                'messages': [{'role': 'user', 'text': 'INTERNAL'},
+                    {'role': 'assistant', 'text': 'Restored reply'},
+                    {'role': 'user', 'text': 'Continue this mount'}]})
+            snapshot = restored.latest('project-a', 'alice')['snapshot']
+            self.assertEqual(snapshot['messages'][-1]['text'], 'Continue this mount')
+            self.assertNotIn('INTERNAL', str(snapshot))
+            restored.observe({'threadId': 'unrelated', 'provider': 'chatgpt', 'messages': [
+                {'role': 'assistant', 'text': 'OTHER PRIVATE CHAT'}]})
+            self.assertNotIn('OTHER PRIVATE CHAT', str(restored.latest('project-a', 'alice')))
+            restored.clear()
+            with self.assertRaises(KeyError): RenderFeed(path).latest('project-a', 'alice')
 
 if __name__=='__main__': unittest.main()

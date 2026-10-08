@@ -1,5 +1,6 @@
+import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-steve-integration2";
 import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-steve-open2";
-import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-chat2";
+import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-integration2";
 import { isSteveChatComplete } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 
 const PREFIX = "render3d:steveDesignChat:v1:";
@@ -22,6 +23,8 @@ export class SteveDesignChat {
     this.memory = new Map();
     this.notified = new Map();
     this.onSnapshot = () => {};
+    this.discovering = new Map();
+    this.onPreviewRecord = () => {};
   }
   get store() { return this.storage || globalThis.localStorage; }
   records(owner) {
@@ -63,6 +66,7 @@ export class SteveDesignChat {
     const notification = serialized + record.persistenceWarning;
     if (this.notified.get(key) !== notification) {
       this.notified.set(key, notification);
+      this.onPreviewRecord(record);
       this.onChange({ userId: record.userId, projectId: record.projectId, requestId: record.requestId });
     }
     return record;
@@ -97,6 +101,8 @@ export class SteveDesignChat {
         !isSteveChatComplete(record.snapshot) ? record.snapshot?.status || "Waiting for STEVE reply…" : ""
       );
       if (record.persistenceWarning) messages.push({ role: "assistant", content: record.persistenceWarning,
+        steve: true, projectId: record.projectId, requestId: record.requestId });
+      if (record.previewStatus) messages.push({ role: "assistant", content: record.previewStatus, runKind: "status",
         steve: true, projectId: record.projectId, requestId: record.requestId });
       if (progress) messages.push({ role: "assistant", content: progress, steve: true,
         projectId: record.projectId, requestId: record.requestId });
@@ -134,6 +140,38 @@ export class SteveDesignChat {
     const record = this.remember({ ...owner }, requestId);
     return this.watch(record, this.createConnector(), { allowAutoOpen: false });
   }
+  recoverLatest(owner) {
+    owner = { userId: String(owner.userId || ""), projectId: String(owner.projectId || "") };
+    const key = ownerKey(owner);
+    if (this.discovering.has(key)) return this.discovering.get(key);
+    const existing = this.records(owner).at(-1);
+    const connector = this.createConnector();
+    const pending = Promise.resolve().then(() => connector.latest(owner)).then(result => {
+      const snapshot = result?.snapshot;
+      if (!snapshot) return existing || null;
+      if (snapshot.renderUserId !== owner.userId || snapshot.renderProjectId !== owner.projectId) {
+        throw new Error("STEVE returned a reply for a different Render user or project; it was not restored.");
+      }
+      const requestId = String(snapshot.requestId || "");
+      if (!requestPattern.test(requestId)) throw new Error("STEVE returned an invalid request ID.");
+      const previous = this.records(owner).find(record => record.requestId === requestId);
+      const record = previous || this.remember(owner, requestId, snapshot.messages?.find(message => message.role === "user")?.text || "");
+      if (!previous) record.resultOpen = { intent: "manual", state: "manual", message: "" };
+      record.snapshot = snapshot;
+      this.onPreviewRecord(record, { authenticated: true });
+      record.connection = "connected";
+      record.error = "";
+      this.write(record);
+      if (!isSteveChatComplete(snapshot)) void this.watch(record, connector, { allowAutoOpen: false });
+      return record;
+    }).catch(error => {
+      if (error?.status === 404) return existing || null;
+      throw error;
+    }).finally(() => this.discovering.delete(key));
+    this.discovering.set(key, pending);
+    return pending;
+  }
+
   resume(owner) {
     return Promise.all(this.records(owner).filter(record => !isSteveChatComplete(record.snapshot) && !record.rejected)
       .map(record => this.watch(record)));
@@ -144,7 +182,7 @@ export class SteveDesignChat {
     this.write(record);
     if (record.persistenceWarning) throw new Error("Cannot save the STEVE request ID. Free browser storage before sending.");
     try {
-      const result = await integration.submitCurrent({ prompt, requestId });
+      const result = await integration.submitCurrent({ prompt, requestId, owner: { userId: record.userId, projectId: record.projectId } });
       void this.watch(record, integration.connector);
       return result;
     } catch (error) {
@@ -163,6 +201,32 @@ export class SteveDesignChat {
 export const steveDesignChat = new SteveDesignChat({
   onChange: detail => globalThis.window?.dispatchEvent(new CustomEvent("render3d:steve-chat-updated", { detail })),
 });
+
+let previewHost = null;
+export function configureSteveLivePreview({ THREE, scene, fit, getOwner }) {
+  const layer = createStevePreviewLayer({ THREE, scene, fit });
+  const connector = new SteveConnector();
+  const preview = new SteveLivePreview({ getOwner, post: packet => connector.preview(packet), ...layer,
+    onError: (error, owner) => {
+      const record = steveDesignChat.records(owner).find(item => item.requestId === owner.requestId);
+      if (record && record.previewStatus !== error.message) { record.previewStatus = error.message; steveDesignChat.write(record); }
+    },
+    display: (packet, options) => {
+      layer.display(packet, options);
+      const record = steveDesignChat.records(getOwner()).find(item => item.requestId === packet.requestId);
+      if (record?.previewStatus) { record.previewStatus = ""; steveDesignChat.write(record); }
+    },
+  });
+  steveDesignChat.onPreviewRecord = (record, options) => preview.observe(record, options);
+  const timer = globalThis.window.setInterval(() => {
+    if (document.visibilityState !== "hidden" && previewHost?.isConnected && previewHost.getClientRects().length) void preview.tick();
+  }, 2000);
+  const reset = () => preview.reset();
+  window.addEventListener("render3d:auth-session", reset);
+  window.addEventListener("render3d:project-changed", reset);
+  window.addEventListener("pagehide", () => { window.clearInterval(timer); preview.reset(); }, { once: true });
+  return preview;
+}
 
 let resultOpener = null;
 export function configureSteveResultOpening(options) {
@@ -186,8 +250,10 @@ export function mountSteveDesignChat(options) {
 }
 
 export function mountSteveReplyRecovery({ host, getOwner }) {
+  previewHost = host;
   const panel = document.createElement("details");
   panel.dataset.steveReplyRecovery = "1";
+  panel.hidden = true;
   panel.style.minWidth = "0";
   const summary = document.createElement("summary");
   summary.textContent = "Recover STEVE reply";
@@ -214,6 +280,44 @@ export function mountSteveReplyRecovery({ host, getOwner }) {
   status.style.overflowWrap = "anywhere";
   panel.append(summary, label, button, status);
   host.querySelector(".prompt-design-header > div:first-child").append(panel);
+  let recoveryEpoch = 0;
+  let activeOwnerKey = "";
+  const recoverForCurrentOwner = (refresh = false) => {
+    const owner = { ...getOwner() };
+    if (!owner.userId || !owner.projectId) {
+      recoveryEpoch += 1;
+      activeOwnerKey = "";
+      panel.hidden = true;
+      status.textContent = "";
+      return;
+    }
+    const nextOwnerKey = `${owner.userId}:${owner.projectId}`;
+    if (refresh !== true && nextOwnerKey === activeOwnerKey) return;
+    activeOwnerKey = nextOwnerKey;
+    const epoch = ++recoveryEpoch;
+    panel.hidden = true;
+    status.textContent = "";
+    void steveDesignChat.recoverLatest(owner).then(record => {
+      if (epoch !== recoveryEpoch) return;
+      if (record) {
+        steveDesignChat.onPreviewRecord(record);
+        status.textContent = "Connected to this project's STEVE reply.";
+        return;
+      }
+      panel.hidden = false;
+    }).catch(error => {
+      if (epoch !== recoveryEpoch) return;
+      panel.hidden = false;
+      status.textContent = error.message;
+    });
+  };
+  const refreshTimer = typeof globalThis.window?.setInterval === "function" ? globalThis.window.setInterval(() => {
+    if (globalThis.document?.visibilityState !== "hidden" && host.isConnected && host.getClientRects().length) recoverForCurrentOwner(true);
+  }, 3000) : null;
+  globalThis.window?.addEventListener("pagehide", () => { if (refreshTimer !== null) globalThis.window.clearInterval(refreshTimer); }, { once: true });
+  recoverForCurrentOwner();
+  globalThis.window?.addEventListener("render3d:auth-session", recoverForCurrentOwner);
+  globalThis.window?.addEventListener("render3d:project-changed", recoverForCurrentOwner);
   button.addEventListener("click", async () => {
     const owner = { ...getOwner() };
     const requestId = input.value.trim();

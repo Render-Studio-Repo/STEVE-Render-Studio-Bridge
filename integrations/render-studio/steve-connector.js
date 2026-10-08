@@ -375,12 +375,80 @@ export class SteveConnector {
     }
   }
 
-  async submit({ prompt, projectId, folderId, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
+  async preview({ requestId, afterRevision = 0 }) {
+    if (!this.previewCapability) {
+      const status = await this.request("/status", { method: "GET", cache: "no-store", signal: AbortSignal.timeout(15000) });
+      if (status?.capabilities?.livePreview !== true) {
+        const error = new Error("Update the STEVE bridge to view live Fusion geometry.");
+        error.code = "steve_preview_unavailable"; throw error;
+      }
+      this.previewCapability = true;
+    }
+    if (!this.secret) this.secret = await this.secretStore.read();
+    if (!this.secret) throw Object.assign(new Error("Reconnect STEVE to view live Fusion geometry."), { status: 401 });
+    const body = JSON.stringify({ requestId, afterRevision });
+    const id = this.cryptoApi.randomUUID(), timestamp = String(Math.floor(Date.now() / 1000)), nonce = randomNonce(this.cryptoApi);
+    const signature = await signSteveSubmission({ secret: this.secret, body, requestId: id,
+      timestamp, nonce, cryptoApi: this.cryptoApi, path: "/v1/preview" });
+    try {
+      return await this.request("/preview", { method: "POST", body, signal: AbortSignal.timeout(15000),
+        headers: { "Content-Type": "application/json", "X-Request-Id": id,
+          "X-Steve-Timestamp": timestamp, "X-Steve-Nonce": nonce, "X-Steve-Signature": signature } });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) {
+        this.secret = null; this.previewCapability = false;
+        try { await this.secretStore.clear(); } catch {}
+        this.emit("detected", { error });
+        error.message = "Reconnect STEVE to view live Fusion geometry.";
+      }
+      throw error;
+    }
+  }
+
+  async latest(owner) {
+    const renderProjectId = String(owner?.projectId || "");
+    const renderUserId = String(owner?.userId || "");
+    if (!renderProjectId || !renderUserId) throw new Error("Sign in and open a Render project first.");
+    const status = await this.request("/status", { method: "GET", cache: "no-store", signal: AbortSignal.timeout(15000) });
+    if (status?.capabilities?.projectChatHistory !== true) {
+      const error = new Error("This STEVE bridge needs an update for automatic project chat recovery. Existing request IDs can still be recovered below.");
+      error.code = "steve_project_history_unavailable";
+      throw error;
+    }
+    if (!this.secret) this.secret = await this.secretStore.read();
+    if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
+    const body = JSON.stringify({ renderProjectId, renderUserId, after: 0 });
+    const id = this.cryptoApi.randomUUID();
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = randomNonce(this.cryptoApi);
+    const signature = await signSteveSubmission({ secret: this.secret, body, requestId: id,
+      timestamp, nonce, cryptoApi: this.cryptoApi, path: "/v1/events" });
+    try {
+      return await this.request("/events", { method: "POST", body, signal: AbortSignal.timeout(15000),
+        headers: { "Content-Type": "application/json", "X-Request-Id": id,
+          "X-Steve-Timestamp": timestamp, "X-Steve-Nonce": nonce, "X-Steve-Signature": signature } });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) {
+        this.secret = null;
+        try { await this.secretStore.clear(); } catch {}
+        this.emit("detected", { error });
+        error.message = "Reconnect STEVE in the CAD engine menu to restore this project's chat.";
+      }
+      throw error;
+    }
+  }
+
+  async submit({ prompt, projectId, folderId, renderProjectId, renderUserId, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
     const cleanPrompt = String(prompt || "").trim();
     if (!cleanPrompt) throw new Error("Enter a CAD prompt before sending to STEVE.");
     if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
     if (this.state !== "ready") throw new Error(STEVE_STATE_VIEW[this.state].recovery);
+    if (Boolean(renderProjectId) !== Boolean(renderUserId)) throw new Error("Both Render project and user IDs are required.");
     const payload = { prompt: cleanPrompt };
+    if (renderProjectId && renderUserId) {
+      payload.renderProjectId = String(renderProjectId);
+      payload.renderUserId = String(renderUserId);
+    }
     if (projectId) payload.projectId = String(projectId);
     if (folderId) payload.folderId = String(folderId);
     const cleanName = normalizeDesignName(designName);
@@ -629,10 +697,12 @@ export function mountSteveConnector({
       connector.deactivate();
       return connector.snapshot();
     },
-    async submitCurrent({ prompt = getPrompt(), requestId } = {}) {
+    async submitCurrent({ prompt = getPrompt(), requestId, owner } = {}) {
       const result = await connector.submit({
         prompt,
         requestId,
+        renderProjectId: owner?.projectId,
+        renderUserId: owner?.userId,
         designName: designName?.value || suggestedDesignName(prompt),
       });
       setPromptStatus("ok", result.message || "Prompt sent to STEVE in Fusion.");

@@ -23,7 +23,7 @@ test("submission persists ID before HTTP and pins prompt/project across navigati
     connector: { watch: async (id, { onUpdate }) => { onUpdate(complete); return complete; } },
     submitCurrent: async packet => {
       assert.equal(chat.records(owner)[0].requestId, "request-1");
-      assert.deepEqual(packet, { prompt: "original prompt", requestId: "request-1" });
+      assert.deepEqual(packet, { prompt: "original prompt", requestId: "request-1", owner });
       await pending; return { requestId: "request-1" };
     },
   };
@@ -186,4 +186,42 @@ test("recovery uses the header slot and captures the clicked ID before awaiting"
     steveDesignChat.storage = previousStorage;
     steveDesignChat.createConnector = previousConnector;
   }
+});
+
+test("latest refreshes a completed cache, pins owner during await, and never auto-opens history", async () => {
+  let release;
+  const wait = new Promise(resolve => { release = resolve; });
+  const mutable = { ...owner };
+  const chat = new SteveDesignChat({ storage: storage(), createConnector: () => ({
+    latest: async pinned => { await wait; assert.deepEqual(pinned, owner); return { snapshot: {
+      ...complete, renderUserId: owner.userId, renderProjectId: owner.projectId,
+      messages: [...complete.messages, { id: "followup", role: "assistant", text: "Follow-up" }],
+    } }; },
+  }) });
+  const record = chat.remember(owner, "request-1"); record.snapshot = complete; chat.write(record);
+  chat.onSnapshot = () => { throw new Error("historical recovery must not import"); };
+  const pending = chat.recoverLatest(mutable);
+  mutable.userId = "bob"; mutable.projectId = "b";
+  release(); await pending;
+  assert.equal(chat.messages(owner).at(-1).content, "Follow-up");
+  assert.deepEqual(chat.records(mutable), []);
+});
+
+test("latest rejects missing or mismatched owner metadata without writing", async () => {
+  for (const fields of [{}, { renderUserId: "bob", renderProjectId: owner.projectId }]) {
+    const chat = new SteveDesignChat({ storage: storage(), createConnector: () => ({
+      latest: async () => ({ snapshot: { ...complete, ...fields } }),
+    }) });
+    await assert.rejects(chat.recoverLatest(owner), /different Render user or project/);
+    assert.deepEqual(chat.records(owner), []);
+  }
+});
+
+test("latest 404 preserves cache without creating a phantom record", async () => {
+  const chat = new SteveDesignChat({ storage: storage(), createConnector: () => ({
+    latest: async () => { throw Object.assign(new Error("none"), { status: 404 }); },
+  }) });
+  assert.equal(await chat.recoverLatest(owner), null);
+  const record = chat.remember(owner, "request-1"); record.snapshot = complete; chat.write(record);
+  assert.equal(await chat.recoverLatest(owner), record);
 });

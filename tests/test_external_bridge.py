@@ -74,6 +74,41 @@ class BridgeHTTPTests(unittest.TestCase):
         return self.request("/v1/submissions", "POST", body,
                             self.auth(secret, body, request_id, nonce, timestamp))
 
+    def test_authenticated_project_lookup_preserves_render_scope(self):
+        secret = self.pair()
+        body = {'prompt': 'Create a mount', 'renderProjectId': 'render-a', 'renderUserId': 'alice'}
+        status, _, _ = self.submit(secret, body)
+        self.assertEqual(status, 202)
+        payload = {'renderProjectId': 'render-a', 'renderUserId': 'alice', 'after': 0}
+        status, _, result = self.request('/v1/events', 'POST', payload,
+            self.auth(secret, payload, path='/v1/events'))
+        self.assertEqual(status, 200)
+        self.assertEqual(result['snapshot']['requestId'], 'request-1')
+        payload['renderUserId'] = 'bob'
+        status, _, _ = self.request('/v1/events', 'POST', payload,
+            self.auth(secret, payload, path='/v1/events'))
+        self.assertEqual(status, 404)
+        status, _, _ = self.submit(secret, {'prompt': 'x', 'renderProjectId': 'render-a'}, request_id='partial')
+        self.assertEqual(status, 400)
+
+    def test_preview_requires_signed_request_and_known_id(self):
+        from steve.render_preview import RenderPreview
+        secret = self.pair()
+        self.bridge.preview = RenderPreview(self.bridge.feed, lambda: None)
+        self.bridge.feed.accept('mesh-a', 'Build')
+        payload = {'requestId': 'mesh-a', 'afterRevision': 0}
+        self.assertEqual(self.request('/v1/preview', 'POST', payload)[0], 401)
+        status, _, result = self.request('/v1/preview', 'POST', payload,
+            self.auth(secret, payload, path='/v1/preview'))
+        self.assertEqual(status, 202)
+        self.assertTrue(result['pending'])
+        payload['requestId'] = 'unrelated'
+        self.assertEqual(self.request('/v1/preview', 'POST', payload,
+            self.auth(secret, payload, path='/v1/preview'))[0], 404)
+        payload['afterRevision'] = True
+        self.assertEqual(self.request('/v1/preview', 'POST', payload,
+            self.auth(secret, payload, path='/v1/preview'))[0], 400)
+
     def test_status_is_sanitized_and_reports_capabilities(self):
         status, headers, result = self.request("/v1/status")
         self.assertEqual(status, 200)
@@ -87,7 +122,7 @@ class BridgeHTTPTests(unittest.TestCase):
             "busy": False,
             "ready": False,
             "pairingId": None,
-            "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
+            "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "livePreview": False, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
             "queueDepth": 0,
         })
         self.assertNotIn("secret", json.dumps(result).lower())
@@ -258,6 +293,14 @@ class MainThreadAdapterTests(unittest.TestCase):
         self.assertIn("Autodesk project ID: project-1", framed)
         self.assertIn("Autodesk folder ID: folder-2", framed)
         self.assertIn("silently falling back", framed)
+
+    def test_handoff_preserves_plain_reference_urls_without_claiming_canvas_transfer(self):
+        prompt = 'Build the mount.\nMotor: https://example.com/motor?size=34&revision=2\nImage: https://example.com/side.png'
+        framed = submission_message(Submission('links', prompt, None, None, None), managed_save=True)
+        self.assertTrue(framed.endswith(prompt))
+        self.assertIn('not automatically attached Fusion canvases or image pixels', framed)
+        self.assertIn('If your provider cannot open a link', framed)
+        self.assertIn('Work only in the pinned document', framed)
 
     def test_adapter_dispatches_one_command_with_fusion_context_and_keeps_the_rest(self):
         from tests.test_clipboard_bridge import load_entry

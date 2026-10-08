@@ -16,6 +16,7 @@ from .steve.app_update import launch_live_update
 from .steve.update_transaction import write_json
 from .steve.external_bridge import ExternalBridge, submission_message
 from .steve.render_storage import RenderStorage
+from .steve.render_preview import RenderPreview
 
 COMMAND_ID = "10X_STEVE_Open"
 PALETTE_ID = "10X_STEVE_Panel"
@@ -176,6 +177,8 @@ class ExternalBridgeEvent(adsk.core.CustomEventHandler):
             if _external_bridge and _controller and _fusion_tools:
                 if _external_bridge.storage:
                     _external_bridge.storage.run_main(allow_save=not _bridge_readiness()["busy"])
+                if _external_bridge.preview:
+                    _external_bridge.preview.run_main(_controller.snapshot(), _fusion_tools.document)
                 _dispatch_bridge_commands(_external_bridge, _controller, _fusion_tools)
                 _publish(_controller.snapshot())
         except Exception:
@@ -356,6 +359,7 @@ def run(context):
         _external_bridge = ExternalBridge(lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID), readiness=_bridge_readiness, config_path=data_home() / "render-bridge.json")
         _external_bridge.storage = RenderStorage(_app, _external_bridge.feed,
             data_home() / "render-storage.json", lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID))
+        _external_bridge.preview = RenderPreview(_external_bridge.feed, lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID))
         try:
             _external_bridge.start()
         except OSError as error:

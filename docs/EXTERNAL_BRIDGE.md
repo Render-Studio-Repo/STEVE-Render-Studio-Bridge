@@ -90,6 +90,36 @@ The address persists in `render-bridge.json` under STEVE's data directory
 Manual file changes are loaded on the next STEVE restart; the settings UI applies them
 immediately. Address changes are rejected while an operation is busy or queued.
 
+
+## Web links and image references
+
+The bridge accepts a plain-text `prompt`. Preserve literal public URLs in that text;
+Render-only linked-item tokens (for example `@amazon-…`) are not URLs and cannot be
+resolved by STEVE unless Render expands them from its reference metadata. Label each
+reference and include its real source URL, image URL when available, and relevant
+known product details. Do not fabricate a source URL from an opaque item ID.
+
+A Render canvas, selected object, or uploaded image is not automatically transferred
+into the Fusion document. Passing an image URL supplies a text reference, not image
+pixels. Protected Render endpoints, local/blob URLs, and login-only pages may be
+unavailable to the model. Attach the image directly in STEVE when visual inspection
+is required and a public image cannot be read. Never put session cookies or API
+credentials in the prompt to make a private link work.
+
+In this fork, the ChatGPT transport enables live web search. The Grok transport also
+passes web-search tools through its provider gateway. Provider availability and page
+access still apply; this is not a guarantee that every URL or image can be opened.
+The Claude, OpenRouter, and custom OpenAI-compatible transports disable web search.
+All providers have `fusion_fetch_docs`, but it reads only the allowlisted Autodesk
+Fusion API HTML pages—it cannot read an arbitrary product listing or motor PDF.
+STEVE's own image attachment flow can supply pixels to image-capable models; the
+current Render bridge submission does not carry binary image attachments.
+
+The handoff instructions distinguish external references from Fusion canvases and
+require STEVE to identify inaccessible references instead of treating an empty Fusion
+document as proof that Render supplied no context. Those bridge-side instructions
+load on the next STEVE start; updating source alone does not restart an active chat.
+
 ## Live Design Chat feed (capabilities.chatEvents)
 
 The bridge now exposes **POST `/v1/events`**, authenticated with the same pairing secret
@@ -320,3 +350,51 @@ continue to use the dropdown browser. Render also displays `/api/autodesk/status
 and offers its existing **Connect Fusion integration** flow when unlinked. Cloud
 account linking and local STEVE pairing are separate: the native picker uses the
 account signed into the running Fusion application.
+
+## Durable Render chat association
+
+Submissions may include `renderProjectId` and `renderUserId` together. These refer to
+Render's project and authenticated user, not the Autodesk `projectId`/`folderId`.
+On bridges advertising `projectChatHistory`, signed `POST /v1/events` accepts either
+`{requestId, after}` or `{renderProjectId, renderUserId, after: 0}`. The latter returns
+the most recent matching request as a full reset snapshot, including its STEVE
+`threadId`. Render must validate returned scope before displaying or persisting it.
+Polling the latest association while the chat is visible also recovers local STEVE
+followups in the same bound conversation. Restoring history must not auto-import an
+old saved file or resubmit the prompt.
+
+Up to 64 public request histories are retained locally in `render-chat-history.json`
+with mode 0600 and a bounded size. No account tokens or hidden reasoning are included.
+Running records restored after restart become stopped until their conversation is
+reopened. A different conversation never inherits an earlier project's association.
+Changing the configured Render origin clears these histories. Legacy requests without
+Render scope still support explicit request-ID recovery; they cannot be guessed into
+a project automatically.
+
+## Live Fusion viewport preview
+
+When `capabilities.livePreview` is true, Render can poll authenticated
+`POST /v1/preview` with `{requestId, afterRevision: 0}` about every two seconds.
+It queues a read-only snapshot on Fusion's main thread; HTTP threads never access the
+Fusion API. Only the matching active STEVE conversation's pinned document is eligible.
+A pending response is HTTP 202. Completed snapshots contain `requestId`, `revision`,
+`pending: false`, `units: "mm"`, `upAxis: "Z"`, `documentName`, and `bodies`:
+
+```json
+{"id":"stable-body-id","name":"Base","positions":[0,0,0,10,0,0,0,10,0],"indices":[0,1,2],"color":[0.65,0.7,0.75]}
+```
+
+When `afterRevision` matches, `unchanged: true` replaces the bodies array. If the
+client cursor exceeds a restarted bridge’s revision, `reset: true` accompanies a full
+snapshot so the client can resume at the lower revision. An `error`
+is explicit and must not erase the last valid geometry. An empty `bodies` array is
+a valid changed snapshot and removes the old preview. The renderer must check its
+current Render account/project/request before every scene update, replace the previous
+preview rather than append copies, and preserve the camera after initial framing.
+
+This is a tessellated preview of visible B-Rep bodies, including occurrence placements;
+it is not an editable CAD import, sketch/canvas transfer, material reproduction, or a
+cloud save. The bridge caches body revisions, exports at most every two seconds, and
+limits snapshots to 256 bodies, 150,000 triangles, and 8 MB. Fusion must finish its
+current main-thread operation before a preview can update. Saved-design imports remain
+available separately for persistent project files.

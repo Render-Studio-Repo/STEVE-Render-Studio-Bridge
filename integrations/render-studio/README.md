@@ -257,3 +257,65 @@ Live verification: an existing completed STEVE reply and its tool activity were 
 into the original Render project without resubmission, and remained after browser refresh.
 The packaged targeted tests pass; broader Render checks still have failures/timeouts, so
 this is not a claim that all host application checks pass.
+
+## Live mesh and automatic project chat recovery
+
+Copy the updated connector, chat wrapper/feed, result opener, and the new
+`steve-prompt-text.js` and `steve-live-preview.js` modules into Render's `frontend/cad`.
+Their adjacent tests are standalone Node tests. `live-preview-host.patch` records the
+minimal host changes against the deployed Render version; review it and merge the
+relevant hunks when your host differs. Preserve existing host imports, history-sync
+hooks and setup controls. Do not replace whole host files.
+
+Use one identical `steve-design-chat.js?v=20261008-steve-integration2` import URL in the
+application's static import, dynamic STEVE loader and Design Chat renderer. Bump the
+outer app/render-agent script URLs too so browsers load the new dependencies.
+
+```js
+import { configureSteveLivePreview }
+  from '../cad/steve-design-chat.js?v=20261008-steve-integration2';
+import { serializeStevePrompt }
+  from '../cad/steve-prompt-text.js?v=20261008-steve-integration2';
+
+configureSteveLivePreview({
+  THREE, scene,
+  fit: object => fitCameraToObject(object),
+  getOwner: () => ({ userId: String(currentUser?.id || ''), projectId: String(projectId || '') }),
+});
+
+// In the STEVE submit branch, capture context before awaiting the connector.
+const owner = { userId: String(currentUser?.id || ''), projectId: String(projectId || '') };
+const stevePrompt = serializeStevePrompt({
+  prompt, references: preparedReferences || composer.getReferences(),
+  images: preparedImages || promptImages || [], origin: window.location.origin,
+});
+const integration = await getSteveIntegration();
+await integration.setActive(true);
+await integration.submitCurrent({ owner, prompt: stevePrompt });
+```
+
+`mountSteveReplyRecovery({host, getOwner})` now automatically requests the latest
+owner/project-scoped chat when the panel opens and every three seconds while visible.
+The native bridge must advertise `projectChatHistory`. It validates returned owner
+metadata and restores completed-chat followups without sending a modeling prompt or
+importing an old saved file. Request-ID recovery remains as a fallback. Existing
+remote server prompt-history synchronization is independent; this portable bundle
+requires no new backend endpoint for live chat or mesh delivery.
+
+The preview uses Render's existing Three scene and a separate transient group. It
+updates every two seconds while the Design Chat panel is visible, replaces the previous
+mesh, disposes old GPU resources, and fits the camera only on the first nonempty frame.
+Positions are millimetres and Z-up. Switching account/project clears the preview.
+Errors retain the last good geometry and show a status message. Restarted bridges can
+return `reset:true` with a lower revision and a full validated snapshot.
+
+Pairing is browser-local. If Render says to connect STEVE first, use the normal STEVE
+setup UI and approve in Fusion. Never paste a pairing secret into logs or scripts.
+A paired Fusion server does not prove this browser has its matching key. Refresh after
+installing the new scripts. Cloud Autodesk integration is still used for the saved-file
+library/import; the live mesh itself comes directly from the local Fusion bridge.
+
+Reference serialization sends plain URLs and available text, not Render-only reference
+chips. Local/protected images are identified as needing a direct attachment. It does
+not transfer image pixels into STEVE or create a Fusion canvas. See the bridge guide
+for provider-specific web access limitations.

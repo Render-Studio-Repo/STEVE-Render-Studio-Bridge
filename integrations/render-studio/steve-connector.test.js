@@ -166,3 +166,82 @@ test("storage rejects stale pairing and main-thread errors", async () => {
   connector.fetchFn = async () => response(200, {pending:false,error:"Folder is inaccessible"});
   await assert.rejects(connector.storage({action:"folders"}), /Folder is inaccessible/);
 });
+
+test("old bridge never receives unsupported project lookup", async () => {
+  const paths = [];
+  const connector = new SteveConnector({ fetchFn: async url => {
+    paths.push(url); return response(200, { capabilities: { chatEvents: true } });
+  } });
+  await assert.rejects(connector.latest({ userId: "alice", projectId: "a" }), /needs an update/);
+  assert.equal(paths.length, 1);
+  assert.match(paths[0], /status$/);
+});
+
+test("latest invalidates stale pairing on 401", async () => {
+  let cleared = false;
+  const connector = new SteveConnector({ cryptoApi: webcrypto,
+    secretStore: { read: async () => "secret", clear: async () => { cleared = true; } },
+    fetchFn: async url => url.endsWith("/status")
+      ? response(200, { capabilities: { projectChatHistory: true } }) : response(401, { error: "unauthorized" }),
+  });
+  await assert.rejects(connector.latest({ userId: "alice", projectId: "a" }), /Reconnect STEVE/);
+  assert.equal(cleared, true);
+  assert.equal(connector.secret, null);
+});
+
+test("submission keeps Autodesk and Render identities separate and requires owner pair", async () => {
+  let body;
+  const connector = new SteveConnector({ cryptoApi: webcrypto, fetchFn: async (url, options) => {
+    body = JSON.parse(options.body); return response(200, { accepted: true });
+  } });
+  connector.secret = "secret"; connector.state = "ready";
+  await assert.rejects(connector.submit({ prompt: "design", renderProjectId: "render-a" }), /Both Render/);
+  await connector.submit({ prompt: "design", projectId: "fusion-p", folderId: "fusion-f",
+    renderProjectId: "render-a", renderUserId: "alice", requestId: "request-123" });
+  assert.deepEqual(body, { prompt: "design", projectId: "fusion-p", folderId: "fusion-f",
+    renderProjectId: "render-a", renderUserId: "alice" });
+});
+
+test("preview signs request-scoped revisions and gates older bridges", async () => {
+  const calls = [];
+  const connector = new SteveConnector({ cryptoApi: webcrypto,
+    secretStore: { read: async () => "secret", clear: async () => {} },
+    fetchFn: async (url, options) => {
+      calls.push({ url, options });
+      return response(200, url.endsWith("/status") ? { capabilities: { livePreview: true } }
+        : { requestId: "request-123", revision: 7, unchanged: true });
+    },
+  });
+  await connector.preview({ requestId: "request-123", afterRevision: 7 });
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].url, /v1\/preview$/);
+  assert.deepEqual(JSON.parse(calls[1].options.body), { requestId: "request-123", afterRevision: 7 });
+  assert.match(calls[1].options.headers["X-Steve-Signature"], /^[0-9a-f]{64}$/);
+  let oldCalls = 0;
+  const old = new SteveConnector({ fetchFn: async () => { oldCalls++; return response(200, { capabilities: {} }); } });
+  await assert.rejects(old.preview({ requestId: "request-123" }), /Update the STEVE/);
+  assert.equal(oldCalls, 1);
+});
+
+test("latest request discovery is signed and scoped to the active Render project", async () => {
+  let captured;
+  const connector = new SteveConnector({
+    fetchFn: async (url, options) => {
+      if (url.endsWith("/v1/status")) return response(200, { capabilities: { projectChatHistory: true } });
+      captured = { url, options }; return response(200, {
+        snapshot: { requestId: "request-found", phase: "running", messages: [] },
+      });
+    },
+    cryptoApi: {
+      subtle: webcrypto.subtle,
+      randomUUID: () => "poll-fixed",
+      getRandomValues: bytes => bytes.fill(2),
+    },
+    secretStore: { read: async () => "secret", clear: async () => {} },
+  });
+  const result = await connector.latest({ projectId: "project-88b644e1", userId: "user-1" });
+  assert.equal(result.snapshot.requestId, "request-found");
+  assert.equal(captured.url, "http://127.0.0.1:38173/v1/events");
+  assert.equal(captured.options.body, '{"renderProjectId":"project-88b644e1","renderUserId":"user-1","after":0}');
+  assert.match(captured.options.headers["X-Steve-Signature"], /^[0-9a-f]{64}$/);
+});
