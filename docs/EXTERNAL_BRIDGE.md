@@ -20,7 +20,7 @@ The default destination for new documents is the current Fusion Data Panel proje
 4. Poll `POST /v1/pairing/complete` with `{"pairingId":"..."}`.
 5. Store the returned secret in browser storage that is unavailable to ordinary page scripts when possible. Do not use `localStorage`.
 
-The completion endpoint returns the secret once. Restarting STEVE clears the in-memory pairing and requires a new approval. A later change can add credential-store persistence without changing the wire protocol.
+The completion endpoint returns the secret once. STEVE saves the approved key in an origin-bound, owner-only `render-pairing.json` file and restores it after normal restarts. Render keeps its matching key in IndexedDB. Changing the Render address revokes the saved pairing; clearing browser storage requires a new approval. Signed `POST /v1/ping` with `{}` verifies the key without submitting modeling work when `capabilities.authPing` is true.
 
 ## Sign a submission
 
@@ -162,9 +162,9 @@ before treating a terminal phase as finished: the final text can follow its stat
 When `reset` is true, replace the local request state with `snapshot`. This occurs on
 first subscribe, after a cursor gap, or an invalid future cursor. Snapshot includes
 `messages`, `phase`, status/error, tools and target document. The bridge retains 64
-request snapshots and 256 replay events in memory, with the latest 100 transcript
-entries (32,000 characters per message). `transcriptTruncated` / message `truncated`
-indicate limits. A restart or address change clears this history and pairing. A 404
+request snapshots and 256 replay events in memory, with a 7.5 MB aggregate transcript
+budget and 32,000 characters per message. `transcriptTruncated` / message `truncated`
+indicate limits. Bounded public history persists across normal restarts; interrupted jobs restore as stopped. Changing the configured address clears the association. A 404
 `request_not_found` means unknown/expired; do not silently resubmit a modeling job.
 
 Only the messages belonging to that Render submission are mirrored, including user
@@ -173,6 +173,32 @@ authentication state, internal reasoning, generated code, raw tool results and i
 are not exposed. Tool names/status and user-visible assistant text are included. Common
 credential patterns are redacted, but design chat still contains the user's design data.
 The copy-debug-log feature remains connection-only.
+
+### Background activity across projects (capabilities.activityFeed)
+
+Signed `POST /v1/activity` accepts exactly
+`{"renderUserId":"<current Render account>","after":0}`. It returns
+`{version:1,cursor,epoch,reset,requests}`. Each entry in `requests` is a full public
+request snapshot with its original `requestId`, `renderUserId`, `renderProjectId`,
+and messages. Results are filtered to that owner across projects; unowned legacy
+requests are excluded. This is a read-only endpoint and never starts modeling work.
+
+Start with `after:0`, then send the returned cursor to receive changed requests.
+A cursor gap returns a full reset. Compare `epoch` on every response and fetch
+`after:0` if it changes: a restarted bridge can reach an old numeric cursor before
+the browser polls again. Retention is bounded to 64 requests and a 7.5 MB aggregate
+transcript budget. A truncated snapshot reports `transcriptTruncated`.
+
+Mount one account-scoped activity watcher at application startup, independently of
+the selected CAD engine or whether Design Chat is open. Use the initial snapshot
+as a quiet baseline, upsert subsequent snapshots by request ID, and deduplicate
+notifications by request/message identity. Reset account state on sign-out/account
+changes. Use the existing authentication retry policy; never replay submissions.
+
+Show completed assistant replies in a bottom-right STEVE notification. Opening its
+conversation should retain the active viewport project; a separate **Open project**
+action may explicitly navigate. Only apply live meshes when both the account and
+originating project match the active viewport, checking again after awaited work.
 
 ### Wiring Render Design Chat
 
@@ -194,8 +220,10 @@ A dependency-free browser implementation is in `examples/render-design-chat-clie
 6. Keep transcript persistence in Render's existing conversation store. Abort the watcher
    on component teardown; subscribing again recovers a snapshot while retained. Aborting
    the watcher **does not stop Fusion's operation**.
-7. On transient network failure show “Reconnecting” and retry with backoff. On 401 require
-   pairing again; on 403 check the configured Render origin; on 404 show history expired.
+7. On transient network or authentication failure show “Reconnecting” and retry with
+   backoff while retaining the saved key. Re-read IndexedDB to adopt a key approved in
+   another tab. If a signature mismatch persists, offer the explicit pairing flow; on
+   403 check the configured Render origin; on 404 show history expired.
    Never convert those errors into automatic CAD resubmissions. New prompts during a job
    queue as separate requests; this endpoint does not implement remote Stop/steer.
 

@@ -27,6 +27,7 @@ def mesh_snapshot(document, cache):
             for proxy in entries(occurrence.bRepBodies):
                 if proxy.isVisible:
                     sources.append((proxy.nativeObject or proxy, occurrence.transform2, occurrence.fullPathName))
+    sources = [(body, transform, path) for body, transform, path in sources if body.faces.count > 0]
     if len(sources) > 256:
         raise ValueError('Live preview exceeds the 256-body limit; use the saved design import.')
     bodies, keep, triangles = [], {}, 0

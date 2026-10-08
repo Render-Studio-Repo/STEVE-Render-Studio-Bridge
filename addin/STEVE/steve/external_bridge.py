@@ -277,13 +277,14 @@ class ExternalBridge:
                 "busy": bool(readiness.get("busy", False)),
                 "ready": bool(self._secret) and bool(readiness.get("providerReady", False)),
                 "pairingId": state.pairing_id,
-                "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "livePreview": self.preview is not None, "storageSettings": self.storage is not None, "autoSave": self.storage is not None, "autoReadOnly": False},
+                "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "livePreview": self.preview is not None, "storageSettings": self.storage is not None, "autoSave": self.storage is not None, "autoReadOnly": False},
                 "queueDepth": len(self._commands),
             }
 
     def configure(self, value):
         origin = normalize_render_origin(value)
         busy = self._readiness().get("busy")
+        cleanup_error = None
         with self._lock:
             if origin == self._render_origin:
                 return
@@ -292,11 +293,21 @@ class ExternalBridge:
             if self._config_path:
                 from .update_transaction import write_json
                 self._config_path.parent.mkdir(parents=True, exist_ok=True)
-                self._config_path.with_name('render-pairing.json').unlink(missing_ok=True)
                 write_json(self._config_path, {"renderOrigin": origin})
+                try:
+                    self._config_path.with_name('render-pairing.json').unlink(missing_ok=True)
+                except OSError as error:
+                    try:
+                        write_json(self._config_path, {"renderOrigin": self._render_origin})
+                    except OSError:
+                        # Rollback failed: match the committed address and revoke
+                        # in memory too; the old on-disk key is origin-bound.
+                        cleanup_error = error
+                    else:
+                        raise
             self._render_origin = origin
             self._origins = frozenset({origin})
-            self._config_error = ""
+            self._config_error = "Render address changed, but old pairing cleanup failed." if cleanup_error else ""
             self._state = ConnectionState(PROTOCOL_VERSION, ConnectionPhase.UNPAIRED)
             self._pending_secret = self._secret = None
             self._nonces.clear()
@@ -305,6 +316,8 @@ class ExternalBridge:
             self.feed.clear()
             self._events.append({"time": self._clock(), "event": "address_changed"})
         self._wake_main_thread()
+        if cleanup_error:
+            raise cleanup_error
 
     def connection_info(self):
         result = self.status()
@@ -450,7 +463,7 @@ class ExternalBridge:
             with self._lock:
                 self._last_contact = self._clock()
             if handler.command == "OPTIONS":
-                if handler.path not in {"/v1/status", "/v1/ping", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions", "/v1/events", "/v1/storage", "/v1/storage/result", "/v1/preview"}:
+                if handler.path not in {"/v1/status", "/v1/ping", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions", "/v1/events", "/v1/activity", "/v1/storage", "/v1/storage/result", "/v1/preview"}:
                     raise BridgeError(404, "not_found", "Route not found.")
                 self._send(handler, 204, None, origin)
                 return
@@ -522,6 +535,13 @@ class ExternalBridge:
                     raise BridgeError(404, 'request_not_found', 'Unknown STEVE request.')
                 except ValueError as error:
                     raise BridgeError(400, 'invalid_request', str(error))
+            elif handler.command == "POST" and handler.path == "/v1/activity":
+                self._authenticate(handler, body)
+                payload = self._json(body)
+                if set(payload) != {'renderUserId', 'after'} or type(payload.get('after')) is not int or payload['after'] < 0:
+                    raise BridgeError(400, 'invalid_request', 'Expected renderUserId and nonnegative integer after.')
+                user_id = _text(payload.get('renderUserId'), 'renderUserId', 256, required=True)
+                result, status = self.feed.activity(user_id, payload['after']), 200
             elif handler.command == "POST" and handler.path == "/v1/events":
                 self._authenticate(handler, body)
                 payload = self._json(body)

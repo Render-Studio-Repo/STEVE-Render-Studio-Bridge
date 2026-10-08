@@ -2,12 +2,40 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from types import ModuleType, SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'addin/STEVE'))
 from steve.render_feed import RenderFeed
-from steve.render_preview import RenderPreview
+from steve.render_preview import RenderPreview, mesh_snapshot
 
 class PreviewTests(unittest.TestCase):
+    def test_empty_fusion_bodies_do_not_block_visible_geometry(self):
+        def collection(items):
+            return SimpleNamespace(count=len(items), item=lambda i: items[i])
+        empty = SimpleNamespace(isVisible=True, faces=collection([]))
+        calculator = Mock()
+        calculator.calculate.return_value = SimpleNamespace(triangleCount=1, nodeCount=3,
+            nodeCoordinates=[SimpleNamespace(x=x, y=y, z=0) for x, y in [(0, 0), (1, 0), (0, 1)]],
+            nodeIndices=[0, 1, 2])
+        solid = SimpleNamespace(isVisible=True, faces=collection([object()]), entityToken='solid',
+            revisionId='1', name='Plate', meshManager=SimpleNamespace(createMeshCalculator=lambda: calculator))
+        proxy = SimpleNamespace(isVisible=True, nativeObject=empty)
+        occurrence = SimpleNamespace(isVisible=True, bRepBodies=collection([proxy]),
+            transform2=None, fullPathName='Empty key:1')
+        root = SimpleNamespace(bRepBodies=collection([empty, solid]), allOccurrences=collection([occurrence]))
+        adsk = ModuleType('adsk')
+        adsk.fusion = ModuleType('adsk.fusion')
+        adsk.fusion.Design = SimpleNamespace(cast=lambda _: SimpleNamespace(rootComponent=root))
+        adsk.fusion.TriangleMeshQualityOptions = SimpleNamespace(LowQualityTriangleMesh=0)
+        document = SimpleNamespace(isValid=True, name='Mount',
+            products=SimpleNamespace(itemByProductType=lambda _: object()))
+        with patch.dict(sys.modules, {'adsk': adsk, 'adsk.fusion': adsk.fusion}):
+            packet = mesh_snapshot(document, {})
+        self.assertEqual(len(packet['bodies']), 1)
+        self.assertEqual(packet['bodies'][0]['name'], 'Plate')
+        self.assertEqual(packet['bodies'][0]['positions'], [0, 0, 0, 10, 0, 0, 0, 10, 0])
+        calculator.calculate.assert_called_once()
+
     def setUp(self):
         self.feed = RenderFeed()
         self.feed.accept('a', 'Build', 'project', 'owner')

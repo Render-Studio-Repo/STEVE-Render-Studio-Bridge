@@ -1,21 +1,28 @@
 """Bounded, request-scoped public chat feed; no account data or model reasoning."""
 from collections import OrderedDict, deque
 from copy import deepcopy
+from hashlib import sha256
 import threading
 import json
 import time
+from uuid import uuid4
 from pathlib import Path
 from .update_transaction import write_json
 
 from .debug_log import redact
+
+MAX_HISTORY_BYTES = 7_500_000
+MAX_REQUESTS = 64
 
 
 class RenderFeed:
     def __init__(self, path=None):
         self._lock = threading.Lock()
         self._requests = OrderedDict()
+        self._observed_signatures = {}
         self._events = deque(maxlen=256)
         self._cursor = 0
+        self._epoch = uuid4().hex
         self.path = Path(path) if path else None
         self._last_save = 0
         if self.path and self.path.exists():
@@ -25,7 +32,7 @@ class RenderFeed:
                 saved = json.loads(self.path.read_text())
                 if not isinstance(saved, dict) or not isinstance(saved.get('requests'), list):
                     raise ValueError('Invalid history')
-                for item in saved['requests'][-64:]:
+                for item in saved['requests'][-MAX_REQUESTS:]:
                     if not isinstance(item, dict) or not isinstance(item.get('requestId'), str) or not isinstance(item.get('messages'), list) or not item['messages'] or not all(isinstance(m, dict) and 'id' in m for m in item['messages']):
                         continue
                     if item.get('phase') not in {'completed', 'failed', 'stopped'}:
@@ -33,12 +40,35 @@ class RenderFeed:
                     self._requests[item['requestId']] = item
             except (OSError, ValueError, TypeError):
                 pass
+        self._bound_history()
+
+    def _bound_history(self):
+        sizes = {key: len(json.dumps(item).encode()) for key, item in self._requests.items()}
+        total = sum(sizes.values()) + 2 * len(sizes)
+        for key, item in self._requests.items():
+            if total <= MAX_HISTORY_BYTES:
+                break
+            original = sizes[key]
+            size = original
+            while size > MAX_HISTORY_BYTES - (total - original) and len(item['messages']) > 1:
+                removed = item['messages'].pop(1)
+                size -= len(json.dumps(removed).encode()) + 2
+            if size != original:
+                item['transcriptTruncated'] = True
+                total += len(json.dumps(item).encode()) - original
+                self._event(key, 'status', {'transcriptTruncated': True})
+        while total > MAX_HISTORY_BYTES and self._requests:
+            key, item = self._requests.popitem(last=False)
+            self._observed_signatures.pop(key, None)
+            self._epoch = uuid4().hex
+            total -= len(json.dumps(item).encode()) + 2
 
     def _persist(self, force=False):
+        self._bound_history()
         if not self.path or not force and time.monotonic() - self._last_save < 1:
             return
         records = list(self._requests.values())
-        while len(json.dumps(records).encode()) > 7_500_000 and records:
+        while len(json.dumps(records).encode()) > MAX_HISTORY_BYTES and records:
             records.pop(0)
         try:
             write_json(self.path, {'version': 1, 'requests': records})
@@ -54,7 +84,9 @@ class RenderFeed:
     def clear(self):
         with self._lock:
             self._requests.clear()
+            self._observed_signatures.clear()
             self._events.clear()
+            self._epoch = uuid4().hex
             self._persist(force=True)
             # Keep the cursor monotonic within the bridge lifetime.
 
@@ -70,8 +102,11 @@ class RenderFeed:
             if render_project_id and render_user_id:
                 item.update(renderProjectId=render_project_id, renderUserId=render_user_id)
             self._requests[request_id] = item
-            while len(self._requests) > 64:
-                self._requests.popitem(last=False)
+            self._observed_signatures.pop(request_id, None)
+            while len(self._requests) > MAX_REQUESTS:
+                evicted, _ = self._requests.popitem(last=False)
+                self._observed_signatures.pop(evicted, None)
+                self._epoch = uuid4().hex
             self._event(request_id, "status", {"phase": "queued", "status": item["status"]})
             self._persist(force=True)
 
@@ -116,10 +151,8 @@ class RenderFeed:
                     summary[key] = item[key]
             if linked and busy:
                 summary['save'] = None
+            previous_cursor = self._cursor
             changed = any(item.get(k) != v for k, v in summary.items())
-            if changed:
-                item.update(summary)
-                self._event(request_id, "status", summary)
             previous = {m["id"]: m for m in item["messages"]}
             messages = [item["messages"][0]]
             # Index zero is the bridge's internal destination wrapper, not a user-facing message.
@@ -143,12 +176,25 @@ class RenderFeed:
                 if len(str(message.get("text", ""))) > 32000:
                     safe["truncated"] = True
                 messages.append(safe)
+            # An identical controller publication must not re-add transcript
+            # messages discarded by the aggregate byte budget.
+            signature = sha256(json.dumps([summary, messages, offset]).encode()).digest()
+            if not changed and self._observed_signatures.get(request_id) == signature:
+                return
+            self._observed_signatures[request_id] = signature
+            if changed:
+                item.update(summary)
+                self._event(request_id, "status", summary)
+            for safe in messages[1:]:
                 if previous.get(safe["id"]) != safe:
                     self._event(request_id, "message", {"message": safe})
             changed = changed or item["messages"] != messages or item.get("transcriptTruncated") != (offset > 1)
             item["messages"] = messages
             item["transcriptTruncated"] = offset > 1
             if changed:
+                # Message removal/window movement must also advance activity.
+                if self._cursor == previous_cursor:
+                    self._event(request_id, 'status', {'transcriptTruncated': offset > 1})
                 self._persist(force=phase in {'completed', 'failed', 'stopped'})
 
     def save_status(self, request_id, save, phase):
@@ -163,6 +209,20 @@ class RenderFeed:
                 item.update(deepcopy(status))
                 self._event(request_id, "status", status)
                 self._persist(force=True)
+
+    def activity(self, user_id, after):
+        """Full public snapshots for exactly one owner, across all projects.
+
+        Clients must compare epoch and re-read after=0 when it changes: a
+        restarted process can pass the previous cursor before the next poll.
+        """
+        with self._lock:
+            reset = after == 0 or after > self._cursor or (self._events and after < self._events[0]['cursor'] - 1)
+            changed = {event['requestId'] for event in self._events if event['cursor'] > after}
+            requests = [item for key, item in self._requests.items()
+                        if item.get('renderUserId') == user_id and (reset or key in changed)]
+            return deepcopy({'version': 1, 'cursor': self._cursor, 'epoch': self._epoch,
+                             'reset': bool(reset), 'requests': requests})
 
     def latest(self, project_id, user_id):
         with self._lock:

@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 from types import SimpleNamespace as Obj
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "addin/STEVE"))
 from steve.external_bridge import ExternalBridge, BridgeError, MAX_QUEUE_SIZE, Submission, submission_message
@@ -21,6 +21,44 @@ ORIGIN = "http://render-studio.test"
 
 
 class BridgeHTTPTests(unittest.TestCase):
+    def test_activity_contract_auth_validation_cors_and_no_model_work(self):
+        payload = {'renderUserId': 'alice', 'after': 0}
+        self.assertEqual(self.request('/v1/activity', 'POST', payload)[0], 401)
+        secret = self.pair()
+        for key, project, owner in [('a', 'one', 'alice'), ('b', 'two', 'alice'),
+                                     ('c', 'one', 'bob'), ('d', 'two', 'bob')]:
+            self.bridge.feed.accept(key, key, project, owner)
+        wakes = self.wakes
+        def activity(body, key=secret, extra=None):
+            return self.request('/v1/activity', 'POST', body,
+                {**self.auth(key, body, path='/v1/activity'), **(extra or {})})
+        status, headers, result = activity(payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Cache-Control'], 'no-store')
+        self.assertEqual(headers['Access-Control-Allow-Origin'], ORIGIN)
+        self.assertEqual(set(result), {'version', 'cursor', 'epoch', 'reset', 'requests'})
+        self.assertEqual([item['requestId'] for item in result['requests']], ['a', 'b'])
+        payload['after'] = result['cursor']
+        self.assertEqual(activity(payload)[2]['requests'], [])
+        self.bridge.feed.fail('b', 'Failed')
+        self.assertEqual([r['requestId'] for r in activity(payload)[2]['requests']], ['b'])
+        self.assertEqual(activity({'renderUserId': 'nobody', 'after': 0})[2]['requests'], [])
+        for bad in [{}, {'renderUserId': 'alice'}, {'after': 0},
+                    *[{'renderUserId': value, 'after': 0} for value in ['', ' ', None, 1, 'x' * 257]],
+                    *[{'renderUserId': 'alice', 'after': value} for value in [True, -1, 1.5, '1', None]],
+                    {**payload, 'renderProjectId': 'one'}, {**payload, 'knownEpoch': 'x'}]:
+            with self.subTest(bad=bad):
+                self.assertEqual(activity(bad)[0], 400)
+        self.assertEqual(activity(payload, key='wrong')[0], 401)
+        self.assertEqual(activity(payload, extra={'Origin': 'https://evil.example'})[0], 403)
+        status, headers, _ = self.request('/v1/activity', 'OPTIONS', headers={
+            'Access-Control-Request-Private-Network': 'true'})
+        self.assertEqual(status, 204)
+        self.assertEqual(headers['Access-Control-Allow-Private-Network'], 'true')
+        self.assertIn('X-Steve-Signature', headers['Access-Control-Allow-Headers'])
+        self.assertEqual(self.bridge.drain_commands(), ())
+        self.assertEqual(self.wakes, wakes)
+
     def setUp(self):
         self.wakes = 0
         self.bridge = ExternalBridge(
@@ -122,7 +160,7 @@ class BridgeHTTPTests(unittest.TestCase):
             "busy": False,
             "ready": False,
             "pairingId": None,
-            "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "livePreview": False, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
+            "capabilities": {"authPing": True, "submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "projectChatHistory": True, "activityFeed": True, "livePreview": False, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
             "queueDepth": 0,
         })
         self.assertNotIn("secret", json.dumps(result).lower())
@@ -352,6 +390,97 @@ class MainThreadAdapterTests(unittest.TestCase):
 
 
 class BridgeSettingsTests(unittest.TestCase):
+    def test_failed_pairing_unlink_rolls_back_address_and_preserves_key(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'render-bridge.json'
+            wake = Mock()
+            bridge = ExternalBridge(wake, config_path=config)
+            pairing = bridge.request_pairing()
+            bridge.approve_pairing(pairing)
+            original = bridge.complete_pairing(pairing)
+            bridge.feed.accept('a', 'Keep this history', 'one', 'alice')
+            baseline = bridge.feed.activity('alice', 0)
+            wake.reset_mock()
+            with patch.object(Path, 'unlink', side_effect=PermissionError('cannot unlink')):
+                with self.assertRaises(PermissionError):
+                    bridge.configure('https://staging.example')
+            self.assertEqual(json.loads(config.read_text())['renderOrigin'], 'https://render3d.app')
+            self.assertEqual(bridge.connection_info()['renderOrigin'], 'https://render3d.app')
+            self.assertEqual(bridge._origins, {'https://render3d.app'})
+            self.assertEqual(bridge._secret, original)
+            self.assertEqual(bridge.status()['phase'], 'paired')
+            self.assertEqual(bridge.feed.activity('alice', 0), baseline)
+            restored = ExternalBridge(lambda: None, config_path=config)
+            self.assertEqual(restored._secret, original)
+            self.assertTrue(restored.status()['connected'])
+            wake.assert_not_called()
+
+    def test_failed_pairing_unlink_and_rollback_match_committed_address(self):
+        import tempfile
+        from steve.update_transaction import write_json
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'render-bridge.json'
+            wake = Mock()
+            bridge = ExternalBridge(wake, config_path=config)
+            pairing = bridge.request_pairing()
+            bridge.approve_pairing(pairing)
+            original = bridge.complete_pairing(pairing)
+            bridge.feed.accept('a', 'Old history', 'one', 'alice')
+            wake.reset_mock()
+            def fail_rollback(path, value):
+                if path == config and value['renderOrigin'] == 'https://render3d.app':
+                    raise OSError('cannot roll back')
+                return write_json(path, value)
+            with patch.object(Path, 'unlink', side_effect=PermissionError('cannot unlink')), \
+                    patch('steve.update_transaction.write_json', side_effect=fail_rollback):
+                with self.assertRaises(PermissionError):
+                    bridge.configure('https://staging.example')
+            self.assertEqual(json.loads(config.read_text())['renderOrigin'], 'https://staging.example')
+            self.assertEqual(bridge.connection_info()['renderOrigin'], 'https://staging.example')
+            self.assertEqual(bridge._origins, {'https://staging.example'})
+            self.assertIsNone(bridge._secret)
+            self.assertFalse(bridge.status()['connected'])
+            self.assertTrue(bridge.connection_info()['configError'])
+            self.assertEqual(bridge.feed.activity('alice', 0)['requests'], [])
+            restored = ExternalBridge(lambda: None, config_path=config)
+            self.assertEqual(restored.connection_info()['renderOrigin'], 'https://staging.example')
+            self.assertFalse(restored.status()['connected'])
+            self.assertNotIn(original, bridge.diagnostics())
+            wake.assert_called_once_with()
+
+    def test_failed_pairing_replacement_preserves_persisted_key(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'render-bridge.json'
+            bridge = ExternalBridge(lambda: None, config_path=config)
+            pairing = bridge.request_pairing()
+            bridge.approve_pairing(pairing)
+            original = bridge.complete_pairing(pairing)
+            replacement = bridge.request_pairing()
+            bridge.approve_pairing(replacement)
+            with patch('steve.external_bridge.os.replace', side_effect=OSError('disk full')):
+                with self.assertRaises(OSError):
+                    bridge.complete_pairing(replacement)
+            self.assertEqual(bridge._secret, original)
+            self.assertEqual(ExternalBridge(lambda: None, config_path=config)._secret, original)
+            self.assertEqual(list(Path(folder).glob('.render-pairing-*')), [])
+
+    def test_failed_address_write_preserves_persisted_pairing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'render-bridge.json'
+            bridge = ExternalBridge(lambda: None, config_path=config)
+            pairing = bridge.request_pairing()
+            bridge.approve_pairing(pairing)
+            original = bridge.complete_pairing(pairing)
+            with patch('steve.update_transaction.write_json', side_effect=OSError('disk full')):
+                with self.assertRaises(OSError):
+                    bridge.configure('https://staging.example')
+            self.assertEqual(bridge.connection_info()['renderOrigin'], 'https://render3d.app')
+            self.assertEqual(bridge._secret, original)
+            self.assertEqual(ExternalBridge(lambda: None, config_path=config)._secret, original)
+
     def test_pairing_survives_restart_privately_and_stays_out_of_status(self):
         import tempfile
         with tempfile.TemporaryDirectory() as folder:
