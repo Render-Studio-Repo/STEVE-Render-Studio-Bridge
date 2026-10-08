@@ -79,6 +79,12 @@ class RenderPreview:
         self.last_export = -float('inf')
         self.revision = 0
         self._connection_epoch = 0
+        self._inflight = 0
+
+    def pending(self):
+        """Include exports claimed from the queue but not yet delivered to cache."""
+        with self.lock:
+            return bool(self.queue or self._inflight)
 
     def clear_connection(self):
         with self.lock:
@@ -89,16 +95,27 @@ class RenderPreview:
             self.cache = {}
             self.cache_document = None
 
+    @staticmethod
+    def _completion_key(item):
+        # A final preview is a snapshot of this completed request, not a new
+        # export subscription on every delivery poll. Resumed/changed feed
+        # state invalidates it and requires a fresh successful export.
+        if item.get('phase') != 'completed' or item.get('error'):
+            return None
+        return hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
+
     def request(self, request_id, after):
-        self.feed.read(request_id, 0)  # Refuse arbitrary/unrelated IDs.
+        item = self.feed.read(request_id, 0)['snapshot']  # Refuse unrelated IDs.
+        completion_key = self._completion_key(item)
         with self.lock:
-            if request_id not in self.queue:
+            value = self.records.get(request_id)
+            refresh = not (completion_key and value and value.get('_completion_key') == completion_key)
+            if refresh and request_id not in self.queue:
                 if len(self.queue) >= 8:
                     raise ValueError('Preview queue is full; retry later.')
                 self.queue[request_id] = True
-            value = self.records.get(request_id)
             if value:
-                result = {k: deepcopy(v) for k, v in value.items() if k != '_digest'}
+                result = {k: deepcopy(v) for k, v in value.items() if k not in {'_digest', '_completion_key'}}
                 if result['revision'] < after:
                     result['reset'] = True
                 if result['revision'] == after:
@@ -106,52 +123,61 @@ class RenderPreview:
                     result['unchanged'] = True
             else:
                 result = {'requestId': request_id, 'revision': 0, 'pending': True}
-        self.wake()
+        if refresh:
+            self.wake()
         return result
 
     def run_main(self, state, document):
         with self.lock:
             if not self.queue or self.clock() - self.last_export < 2:
+                # STEVE's existing one-second idle wake retries queued exports,
+                # even if the requesting browser closes during this interval.
                 return
             epoch = self._connection_epoch
             pending = list(self.queue)
             self.queue.clear()
-        self.last_export = self.clock()
-        for request_id in pending:
-            try:
-                item = self.feed.read(request_id, 0)['snapshot']
-            except KeyError:
-                continue  # Pairing/address changes may clear the feed while a poll is queued.
-            matches = (state.get('bridgeRequestId') == request_id or
-                       bool(item.get('threadId') and item['threadId'] == state.get('threadId')
-                            and item.get('provider') == state.get('provider')))
-            try:
-                if not matches or state.get('bridgeSendQueued'):
-                    raise ValueError('Open the linked STEVE conversation to preview its pinned document.')
-                with self.lock:
-                    if epoch != self._connection_epoch:
-                        continue
-                    if document is not self.cache_document:
-                        self.cache.clear()
-                        self.cache_document = document
-                    cache = self.cache
-                snapshot = self.exporter(document, cache)
-                digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
-                with self.lock:
-                    if epoch != self._connection_epoch:
-                        continue
-                    old = self.records.get(request_id, {})
-                    if old.get('_digest') != digest:
+            self._inflight += 1
+        try:
+            self.last_export = self.clock()
+            for request_id in pending:
+                try:
+                    item = self.feed.read(request_id, 0)['snapshot']
+                except KeyError:
+                    continue  # Pairing/address changes may clear the feed while a poll is queued.
+                matches = (state.get('bridgeRequestId') == request_id or
+                           bool(item.get('threadId') and item['threadId'] == state.get('threadId')
+                                and item.get('provider') == state.get('provider')))
+                try:
+                    if not matches or state.get('bridgeSendQueued'):
+                        raise ValueError('Open the linked STEVE conversation to preview its pinned document.')
+                    with self.lock:
+                        if epoch != self._connection_epoch:
+                            continue
+                        if document is not self.cache_document:
+                            self.cache.clear()
+                            self.cache_document = document
+                        cache = self.cache
+                    snapshot = self.exporter(document, cache)
+                    digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+                    with self.lock:
+                        if epoch != self._connection_epoch:
+                            continue
+                        old = self.records.get(request_id, {})
+                        if old.get('_digest') != digest:
+                            self.revision += 1
+                            self.records[request_id] = {**snapshot, 'requestId': request_id,
+                                'revision': self.revision, 'pending': False, '_digest': digest}
+                        self.records[request_id]['_completion_key'] = self._completion_key(item)
+                except Exception as error:
+                    with self.lock:
                         self.revision += 1
-                        self.records[request_id] = {**snapshot, 'requestId': request_id,
-                            'revision': self.revision, 'pending': False, '_digest': digest}
-            except Exception as error:
+                        if epoch != self._connection_epoch:
+                            continue
+                        self.records[request_id] = {'requestId': request_id, 'revision': self.revision,
+                                                   'pending': False, 'error': str(error)[:500]}
                 with self.lock:
-                    self.revision += 1
-                    if epoch != self._connection_epoch:
-                        continue
-                    self.records[request_id] = {'requestId': request_id, 'revision': self.revision,
-                                               'pending': False, 'error': str(error)[:500]}
+                    while len(self.records) > 8:
+                        self.records.popitem(last=False)
+        finally:
             with self.lock:
-                while len(self.records) > 8:
-                    self.records.popitem(last=False)
+                self._inflight -= 1

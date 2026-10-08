@@ -37,7 +37,7 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers['Cache-Control'], 'no-store')
         self.assertEqual(headers['Access-Control-Allow-Origin'], ORIGIN)
-        self.assertEqual(set(result), {'version', 'cursor', 'epoch', 'reset', 'requests', 'binding'})
+        self.assertEqual(set(result), {'version', 'cursor', 'epoch', 'reset', 'requests', 'binding', 'busy', 'availableForProjectChange'})
         self.assertEqual([item['requestId'] for item in result['requests']], ['a'])
         payload['after'] = result['cursor']
         self.assertEqual(activity(payload)[2]['requests'], [])
@@ -339,7 +339,7 @@ class BridgeHTTPTests(unittest.TestCase):
                                     ('c', 'bob', 'render-a'), ('d', 'bob', 'two'), ('legacy', None, None)]:
             self.bridge.feed.accept(key, key, project, owner)
             self.bridge.feed.fail(key, 'Done')
-        self.bridge.preview = Obj(request=Mock(return_value={'pending': False}))
+        self.bridge.preview = Obj(request=Mock(return_value={'pending': False}), pending=lambda: False)
         for key in ['b', 'c', 'd', 'legacy']:
             for path, payload in [('/v1/events', {'requestId': key, 'after': 0}),
                                   ('/v1/preview', {'requestId': key, 'afterRevision': 0})]:
@@ -361,6 +361,33 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual(self.signed(secret, '/v1/events', {'requestId': 'd', 'after': 0})[0], 200)
         self.assertEqual(self.signed(secret, '/v1/project', switch)[2]['error']['code'], 'project_binding_changed')
 
+    def test_finished_activity_metadata_retains_owner_and_refreshes_without_feed_events(self):
+        secret = self.pair()
+        binding = self.bridge.project.binding.public()
+        self.bridge.feed.accept('done', 'Build', 'render-a', 'alice')
+        self.bridge.feed.observe({'bridgeRequestId': 'done', 'status': 'Ready'})
+        def activity(owner, after=0):
+            return self.signed(secret, '/v1/activity', {'renderUserId': owner, 'after': after})[2]
+        result = activity('alice')
+        self.assertFalse(result['busy'])
+        self.assertTrue(result['availableForProjectChange'])
+        self.assertEqual(result['binding'], binding)
+        self.bridge.preview = Obj(pending=lambda: True)
+        delta = activity('alice', result['cursor'])
+        self.assertEqual(delta['requests'], [])
+        self.assertTrue(delta['busy'])
+        self.assertFalse(delta['availableForProjectChange'])
+        hidden = activity('bob')
+        self.assertIsNone(hidden['binding'])
+        self.assertEqual(hidden['requests'], [])
+        self.assertFalse(hidden['busy'])
+        self.assertFalse(hidden['availableForProjectChange'])
+        self.bridge.preview.pending = lambda: False
+        final = activity('alice', result['cursor'])
+        self.assertTrue(final['availableForProjectChange'])
+        self.assertEqual(final['binding'], binding)
+        self.assertEqual(self.signed(secret, '/v1/events', {'requestId': 'done', 'after': 0})[0], 200)
+
     def test_legacy_missing_revision_and_old_save_retries_cannot_bypass_lock(self):
         secret = self.pair()
         for payload, code in [({'prompt': 'Legacy'}, 'project_mismatch'),
@@ -369,7 +396,7 @@ class BridgeHTTPTests(unittest.TestCase):
             self.assertEqual((status, result['error']['code']), (409, code))
         self.bridge.feed.accept('old', 'Old', 'two', 'alice')
         self.bridge.feed.fail('old', 'Save failed')
-        self.bridge.storage = Obj(submit=Mock(), result=Mock(), saving=lambda: False)
+        self.bridge.storage = Obj(submit=Mock(), result=Mock(), saving=lambda: False, connection_busy=lambda: False)
         self.assertEqual(self.signed(secret, '/v1/storage', {'action': 'retrySave', 'requestId': 'old'})[0], 409)
         self.bridge.storage.submit.assert_not_called()
         self.bridge._save_retries['old-op'] = 'old'

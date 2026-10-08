@@ -298,7 +298,11 @@ class ExternalBridge:
     def _project_busy(self, native_busy=False):
         if self._commands or native_busy or self.feed.project_state()[1]:
             return True
+        if self.preview and self.preview.pending():
+            return True
         if self.storage:
+            if self.storage.connection_busy():
+                return True
             if self.storage.saving():
                 return True
             for request_id in tuple(self._pending_retries):
@@ -317,10 +321,12 @@ class ExternalBridge:
     def project_request(self, payload, handler=None):
         action = payload.get('action')
         if payload == {'action': 'get'}:
-            with self._lock:
-                self._check_authenticated(handler)
-                self._project_available()
-                return self._project_packet()
+            with self._admission():
+                native_busy = self._readiness().get('busy')
+                with self._lock:
+                    self._check_authenticated(handler)
+                    self._project_available()
+                    return self._project_packet(native_busy)
         if action != 'bind' or set(payload) != {'action', 'renderUserId', 'renderProjectId', 'expectedRevision'}:
             raise BridgeError(400, 'invalid_request', 'Invalid project action or fields.')
         user = _text(payload['renderUserId'], 'renderUserId', 256, required=True)
@@ -335,14 +341,18 @@ class ExternalBridge:
                 if revision != (current.revision if current else None):
                     raise BridgeError(409, 'project_binding_changed', 'The project binding changed; refresh before binding.')
                 if current and (current.renderUserId, current.renderProjectId) == (user, project):
-                    return self._project_packet()
+                    return self._project_packet(native_busy)
                 if self._project_busy(native_busy):
                     raise BridgeError(409, 'project_busy', 'Wait for queued work, execution and saves to finish.')
                 self.project.replace(ProjectBinding.create(user, project))
-                return self._project_packet()
+                return self._project_packet(native_busy)
 
-    def _project_packet(self):
-        return {'version': 1, 'binding': self.project.binding.public() if self.project.binding else None}
+    def _project_packet(self, native_busy=False):
+        busy = self._project_busy(native_busy)
+        binding = self.project.binding
+        finished = bool(binding and self.feed.project_finished(binding.renderProjectId, binding.renderUserId))
+        return {'version': 1, 'binding': binding.public() if binding else None,
+                'busy': busy, 'availableForProjectChange': bool(finished and not busy)}
 
     def _require_project(self, user, project):
         self._project_available()
@@ -694,16 +704,20 @@ class ExternalBridge:
                 if set(payload) != {'renderUserId', 'after'} or type(payload.get('after')) is not int or payload['after'] < 0:
                     raise BridgeError(400, 'invalid_request', 'Expected renderUserId and nonnegative integer after.')
                 user_id = _text(payload.get('renderUserId'), 'renderUserId', 256, required=True)
-                with self._lock:
-                    self._check_authenticated(handler)
-                    self._project_available()
-                    binding = self.project.binding
-                    result = self.feed.activity(user_id, payload['after'])
-                    visible = binding is not None and binding.renderUserId == user_id
-                    result['requests'] = [r for r in result['requests'] if visible and r.get('renderProjectId') == binding.renderProjectId]
-                    result['binding'] = binding.public() if visible else None
-                    result['epoch'] = sha256((result['epoch'] + ':' + (binding.revision if visible else 'unbound')).encode()).hexdigest()
-                    status = 200
+                with self._admission():
+                    native_busy = self._readiness().get('busy')
+                    with self._lock:
+                        self._check_authenticated(handler)
+                        self._project_available()
+                        binding = self.project.binding
+                        result = self.feed.activity(user_id, payload['after'])
+                        visible = binding is not None and binding.renderUserId == user_id
+                        result['requests'] = [r for r in result['requests'] if visible and r.get('renderProjectId') == binding.renderProjectId]
+                        result['binding'] = binding.public() if visible else None
+                        lifecycle = self._project_packet(native_busy) if visible else {'busy': False, 'availableForProjectChange': False}
+                        result.update({key: lifecycle[key] for key in ('busy', 'availableForProjectChange')})
+                        result['epoch'] = sha256((result['epoch'] + ':' + (binding.revision if visible else 'unbound')).encode()).hexdigest()
+                        status = 200
             elif handler.command == "POST" and handler.path == "/v1/events":
                 self._authenticate(handler, body)
                 payload = self._json(body)

@@ -27,7 +27,7 @@ class ProjectTests(unittest.TestCase):
 
     def test_cas_same_binding_and_aba_submission_revision(self):
         bridge = ExternalBridge(lambda: None)
-        self.assertEqual(bridge.project_request({'action': 'get'}), {'version': 1, 'binding': None})
+        self.assertEqual(bridge.project_request({'action': 'get'}), {'version': 1, 'binding': None, 'busy': False, 'availableForProjectChange': False})
         self.error('project_unbound', lambda: bridge._enqueue(Submission('a', 'p', None, None, None), 'hash'))
         first = self.bind(bridge)
         self.assertEqual(len(first['revision']), 32)
@@ -243,7 +243,6 @@ class ProjectTests(unittest.TestCase):
             bridge.storage.jobs['old'] = {'state': 'done', 'document': document}
             bridge.preview = RenderPreview(bridge.feed, lambda: None)
             bridge.preview.records['old'] = {'private': 'old mesh'}
-            bridge.preview.queue['old'] = True
             bridge._save_retries['op'] = 'old'
             bridge._pending_retries.add('op')
             baseline = bridge.feed.activity('alice', 0)
@@ -372,13 +371,258 @@ class ProjectTests(unittest.TestCase):
         worker.start()
         try:
             self.assertTrue(exporting.wait(2))
-            bridge.configure('https://other.example')
+            with self.assertRaises(ValueError):
+                bridge.configure('https://other.example')
+            preview.clear_connection()  # Also fence explicit cache invalidation during export.
         finally:
             release.set()
             worker.join(2)
         self.assertFalse(worker.is_alive())
         self.assertEqual(preview.records, {})
         self.assertEqual(preview.cache, {})
+
+    def test_finished_request_becomes_available_without_releasing_final_owner(self):
+        bridge = ExternalBridge(lambda: None)
+        first = self.bind(bridge)
+        packet = lambda: bridge.project_request({'action': 'get'})
+        self.assertFalse(packet()['availableForProjectChange'])
+        bridge._enqueue(Submission('done', 'Build', None, None, None, 'one', 'alice', first['revision']), 'hash')
+        self.assertTrue(packet()['busy'])
+        bridge.drain_commands()
+        self.assertTrue(packet()['busy'])
+        bridge.feed.observe({'bridgeRequestId': 'done', 'busy': True})
+        self.assertFalse(packet()['availableForProjectChange'])
+        bridge.feed.observe({'bridgeRequestId': 'done', 'busy': False, 'status': 'Ready'})
+        self.assertEqual(packet(), {'version': 1, 'binding': first, 'busy': False, 'availableForProjectChange': True})
+        bridge._require_request('done')  # Final chat/models remain authorized.
+        self.assertEqual(bridge.feed.read('done', 0)['snapshot']['phase'], 'completed')
+        bridge._readiness = lambda: {'busy': True}
+        self.assertTrue(packet()['busy'])
+        self.assertFalse(packet()['availableForProjectChange'])
+        bridge._readiness = lambda: {'busy': False}
+        second = self.bind(bridge, project='two', revision=first['revision'])
+        self.assertNotEqual(first['revision'], second['revision'])
+        self.assertFalse(packet()['availableForProjectChange'])
+        self.error('project_mismatch', lambda: bridge._require_request('done'))
+
+    def test_finished_availability_survives_restart_with_binding_and_final_chat(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'render-bridge.json'
+            bridge = ExternalBridge(lambda: None, config_path=config)
+            binding = self.bind(bridge)
+            bridge.feed.accept('done', 'Build', 'one', 'alice')
+            bridge.feed.observe({'bridgeRequestId': 'done', 'status': 'Ready'})
+            bridge.feed.save_status('done', {'state': 'saved'}, 'completed')
+            restored = ExternalBridge(lambda: None, config_path=config)
+            packet = restored.project_request({'action': 'get'})
+            self.assertEqual(packet['binding'], binding)
+            self.assertTrue(packet['availableForProjectChange'])
+            restored._require_request('done')
+
+    def test_failed_stopped_waiting_and_unsaved_requests_are_not_available(self):
+        cases = [({'phase': 'failed'}, False), ({'phase': 'stopped'}, False),
+                 ({'waitingForFusion': True}, False), ({'status': 'Needs attention'}, False),
+                 ({'error': 'failed'}, False), ({'save': {'state': 'failed'}}, False),
+                 ({'save': {'state': 'pending'}}, False), ({'save': {'state': 'saved'}}, True), ({'save': {'state': 'unchanged'}}, True)]
+        for changes, available in cases:
+            with self.subTest(changes=changes):
+                bridge = ExternalBridge(lambda: None)
+                self.bind(bridge)
+                bridge.feed.accept('done', 'Build', 'one', 'alice')
+                bridge.feed.observe({'bridgeRequestId': 'done', 'busy': False, 'status': 'Ready'})
+                bridge.feed._requests['done'].update(changes)
+                self.assertEqual(bridge.project_request({'action': 'get'})['availableForProjectChange'], available)
+
+    def test_preview_queue_and_claimed_export_block_availability_and_handoff(self):
+        from steve.render_preview import RenderPreview
+        bridge = ExternalBridge(lambda: None)
+        first = self.bind(bridge)
+        bridge.feed.accept('done', 'Build', 'one', 'alice')
+        bridge.feed.observe({'bridgeRequestId': 'done', 'status': 'Ready'})
+        exporting, release = threading.Event(), threading.Event()
+        def exporter(document, cache):
+            exporting.set()
+            release.wait(2)
+            return {'bodies': []}
+        bridge.preview = RenderPreview(bridge.feed, lambda: None, exporter=exporter)
+        bridge.preview.request('done', 0)
+        change = lambda: self.bind(bridge, project='two', revision=first['revision'])
+        self.error('project_busy', change)
+        self.assertTrue(bridge.project_request({'action': 'get'})['busy'])
+        worker = threading.Thread(target=bridge.preview.run_main, args=({'bridgeRequestId': 'done'}, object()))
+        worker.start()
+        try:
+            self.assertTrue(exporting.wait(2))
+            self.assertFalse(bridge.preview.queue)
+            self.error('project_busy', change)
+            self.assertFalse(bridge.project_request({'action': 'get'})['availableForProjectChange'])
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(bridge.preview.pending())
+        self.assertTrue(bridge.project_request({'action': 'get'})['availableForProjectChange'])
+        self.assertEqual(bridge.project.binding.public(), first)
+
+    def test_completed_preview_polling_does_not_starve_availability_or_handoff(self):
+        from steve.render_preview import RenderPreview
+        from unittest.mock import Mock
+        bridge = ExternalBridge(lambda: None)
+        first = self.bind(bridge)
+        bridge.feed.accept('done', 'Build', 'one', 'alice')
+        bridge.feed.observe({'bridgeRequestId': 'done', 'status': 'Ready'})
+        now = [0]
+        exporter = Mock(return_value={'bodies': []})
+        wake = Mock()
+        bridge.preview = RenderPreview(bridge.feed, wake, exporter=exporter, clock=lambda: now[0])
+        bridge.preview.request('done', 0)
+        bridge.preview.run_main({'bridgeRequestId': 'done'}, object())
+        revision = bridge.preview.revision
+        for i in range(20):
+            now[0] += 2
+            result = bridge.preview.request('done', revision)
+            self.assertTrue(result['unchanged'])
+            self.assertNotIn('_completion_key', result)
+            self.assertFalse(bridge.preview.pending())
+            # Poll project state immediately after preview, the worst ordering.
+            self.assertTrue(bridge.project_request({'action': 'get'})['availableForProjectChange'])
+            bridge.preview.run_main({'bridgeRequestId': 'done'}, object())
+        exporter.assert_called_once()
+        wake.assert_called_once()
+        self.bind(bridge, project='two', revision=first['revision'])
+
+    def test_final_preview_refreshes_after_running_completion_and_linked_resume(self):
+        from steve.render_preview import RenderPreview
+        from unittest.mock import Mock
+        bridge = ExternalBridge(lambda: None)
+        self.bind(bridge)
+        bridge.feed.accept('done', 'Build', 'one', 'alice')
+        bridge.feed.observe({'bridgeRequestId': 'done', 'threadId': 'thread', 'provider': 'test', 'busy': True})
+        now = [0]
+        exporter = Mock(return_value={'bodies': []})
+        preview = RenderPreview(bridge.feed, lambda: None, exporter=exporter, clock=lambda: now[0])
+        bridge.preview = preview
+        state = {'bridgeRequestId': 'done', 'threadId': 'thread', 'provider': 'test'}
+        document = object()
+        preview.request('done', 0)
+        preview.run_main(state, document)
+        bridge.feed.observe({**state, 'busy': False, 'status': 'Ready'})
+        now[0] += 2
+        preview.request('done', preview.revision)
+        self.assertTrue(preview.pending())  # Running cache cannot stand in for final delivery.
+        preview.run_main(state, document)
+        preview.request('done', preview.revision)
+        self.assertFalse(preview.pending())
+        # A native follow-up on the linked conversation invalidates final cache.
+        linked = {'threadId': 'thread', 'provider': 'test'}
+        bridge.feed.observe({**linked, 'busy': True})
+        now[0] += 2
+        preview.request('done', preview.revision)
+        self.assertTrue(preview.pending())
+        preview.run_main(linked, document)
+        bridge.feed.observe({**linked, 'busy': False, 'status': 'Ready'})
+        now[0] += 2
+        preview.request('done', preview.revision)
+        preview.run_main(linked, document)
+        preview.request('done', preview.revision)
+        self.assertFalse(preview.pending())
+        self.assertEqual(exporter.call_count, 4)
+
+    def test_failed_final_preview_is_retryable_and_does_not_leak_internal_key(self):
+        from steve.render_preview import RenderPreview
+        from unittest.mock import Mock
+        bridge = ExternalBridge(lambda: None)
+        self.bind(bridge)
+        bridge.feed.accept('done', 'Build', 'one', 'alice')
+        bridge.feed.observe({'bridgeRequestId': 'done', 'status': 'Ready'})
+        now = [0]
+        exporter = Mock(side_effect=[ValueError('temporary'), {'bodies': []}])
+        preview = RenderPreview(bridge.feed, lambda: None, exporter=exporter, clock=lambda: now[0])
+        preview.request('done', 0)
+        preview.run_main({'bridgeRequestId': 'done'}, object())
+        now[0] += 2
+        result = preview.request('done', 0)
+        self.assertEqual(result['error'], 'temporary')
+        self.assertTrue(preview.pending())
+        preview.run_main({'bridgeRequestId': 'done'}, object())
+        result = preview.request('done', 0)
+        self.assertNotIn('error', result)
+        self.assertNotIn('_completion_key', result)
+        self.assertFalse(preview.pending())
+
+    def test_existing_idle_wake_drains_throttled_preview_after_tab_closes(self):
+        import ast
+        from steve.render_preview import RenderPreview
+        from steve.render_storage import RenderStorage
+        from unittest.mock import Mock
+        # Execute the real nested idle-loop body deterministically, without a
+        # worker thread, sleep, application startup, or browser polling.
+        source = (Path(__file__).resolve().parents[1] / 'addin/STEVE/STEVE.py').read_text()
+        module = ast.parse(source)
+        wake_node = next(n for n in ast.walk(module) if isinstance(n, ast.FunctionDef) and n.name == 'update_wake')
+        for live_compatibility in (False, True):
+            with self.subTest(live_compatibility=live_compatibility), tempfile.TemporaryDirectory() as folder:
+                bridge = ExternalBridge(lambda: None)
+                binding = self.bind(bridge)
+                bridge.feed.accept('done', 'Build', 'one', 'alice')
+                bridge.feed.observe({'bridgeRequestId': 'done', 'status': 'Ready'})
+                now = [0]
+                preview = RenderPreview(bridge.feed, lambda: None, exporter=lambda *_: {'bodies': []}, clock=lambda: now[0])
+                bridge.preview = preview
+                preview.last_export = 0
+                storage = RenderStorage(None, bridge.feed, Path(folder) / 'storage.json', lambda: None)
+                bridge.storage = storage
+                preview.request('done', 0)
+                preview.run_main({'bridgeRequestId': 'done'}, object())
+                self.assertTrue(preview.pending())
+                if live_compatibility:
+                    # The already-running old loop consults this instance method
+                    # every second. Preserve native storage work and add previews.
+                    storage.pending = lambda: RenderStorage.pending(storage) or preview.pending()
+                class Stop:
+                    ticks = 0
+                    def wait(self, seconds):
+                        self.ticks += 1
+                        now[0] += seconds
+                        return self.ticks > 2
+                def fire(_):
+                    preview.run_main({'bridgeRequestId': 'done'}, object())
+                fire_event = Mock(side_effect=fire)
+                context = {'_update_wake_stop': Stop(), '_external_bridge': bridge,
+                           '_controller': None, '_app': SimpleNamespace(fireCustomEvent=fire_event),
+                           'BRIDGE_EVENT_ID': 'bridge'}
+                if live_compatibility:
+                    # Original loop predicate, retained by the live old thread.
+                    while not context['_update_wake_stop'].wait(1):
+                        if bridge.storage and bridge.storage.pending():
+                            fire_event('bridge')
+                else:
+                    exec(compile(ast.Module(body=[wake_node], type_ignores=[]), '<idle-wake>', 'exec'), context)
+                    context['update_wake']()
+                self.assertEqual(fire_event.call_count, 2)
+                self.assertFalse(preview.pending())
+                self.assertTrue(bridge.project_request({'action': 'get'})['availableForProjectChange'])
+                self.bind(bridge, project='two', revision=binding['revision'])
+
+    def test_save_and_claimed_storage_work_block_completed_request_availability(self):
+        from steve.render_storage import RenderStorage
+        with tempfile.TemporaryDirectory() as folder:
+            bridge = ExternalBridge(lambda: None)
+            self.bind(bridge)
+            bridge.feed.accept('done', 'Build', 'one', 'alice')
+            bridge.feed.observe({'bridgeRequestId': 'done', 'status': 'Ready'})
+            storage = RenderStorage(None, bridge.feed, Path(folder) / 'storage.json', lambda: None)
+            bridge.storage = storage
+            storage.submit('op', {'action': 'getSettings'})
+            storage.queue.clear()
+            packet = lambda: bridge.project_request({'action': 'get'})
+            self.assertTrue(packet()['busy'])
+            storage.operations['op']['pending'] = False
+            storage.jobs['done'] = {'state': 'uploading'}
+            self.assertFalse(packet()['availableForProjectChange'])
+            storage.jobs['done']['state'] = 'done'
+            bridge.feed.save_status('done', {'state': 'saved'}, 'completed')
+            self.assertTrue(packet()['availableForProjectChange'])
 
     def test_retained_request_id_cannot_overwrite_dispatch_reservation(self):
         bridge = ExternalBridge(lambda: None)
@@ -424,7 +668,7 @@ class ProjectTests(unittest.TestCase):
         first = self.bind(bridge)
         pending = [True]
         saving = [False]
-        bridge.storage = SimpleNamespace(saving=lambda: saving[0], result=lambda _: {'pending': pending[0]})
+        bridge.storage = SimpleNamespace(connection_busy=lambda: saving[0], saving=lambda: saving[0], result=lambda _: {'pending': pending[0]})
         bridge._save_retries['retry'] = 'original'
         bridge._pending_retries.add('retry')
         change = lambda: self.bind(bridge, project='two', revision=first['revision'])

@@ -260,6 +260,19 @@ class RenderFeed:
                        for r in self._requests.values())
             return owners, busy
 
+    def project_finished(self, project_id, user_id):
+        """Engine request completion, never an inference about assistant prose."""
+        with self._lock:
+            item = next((entry for entry in reversed(self._requests.values())
+                         if entry.get('renderProjectId') == project_id
+                         and entry.get('renderUserId') == user_id), None)
+            return bool(item and item.get('phase') == 'completed'
+                        and not item.get('error') and not item.get('waitingForFusion')
+                        and not item.get('activeTools')
+                        and item.get('status') not in {'Needs attention', 'Stopped'}
+                        and (not item.get('save') or item['save'].get('state') in {'saved', 'unchanged'})
+                        and not any(m.get('delivery') in {'pending', 'failed'} for m in item['messages']))
+
     def activity(self, user_id, after):
         """Full public snapshots for exactly one owner, across all projects.
 

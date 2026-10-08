@@ -382,7 +382,8 @@ def run(context):
         def update_wake():
             while not _update_wake_stop.wait(1):
                 controller = _controller
-                if _external_bridge and _external_bridge.storage and _external_bridge.storage.pending():
+                if _external_bridge and ((_external_bridge.storage and _external_bridge.storage.pending())
+                        or (_external_bridge.preview and _external_bridge.preview.pending())):
                     _app.fireCustomEvent(BRIDGE_EVENT_ID)
                 if controller and controller.state.get('updateInstallReady'):
                     _publish(controller.snapshot())
