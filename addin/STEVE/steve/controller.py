@@ -332,7 +332,8 @@ class Controller:
             end = len(messages) if self._transcript_end is None else min(self._transcript_end, len(messages))
             start = max(0, end - 200)
             return {**copy.deepcopy({**self.state, 'messages': messages[start:end]}),
-                     'bridgeMessages': copy.deepcopy(messages[max(self.state.get('bridgeMessageStart', len(messages)), len(messages)-100):]) if self.state.get('bridgeRequestId') else [],
+                     'bridgeSendQueued': self._send_queued,
+                    'bridgeMessages': copy.deepcopy(messages[max(self.state.get('bridgeMessageStart', len(messages)), len(messages)-100):]) if self.state.get('bridgeRequestId') else [],
                     'bridgeMessageOffset': max(0, len(messages)-100-self.state.get('bridgeMessageStart', len(messages))),
                     'messageOffset': start, 'olderMessagesCount': start,
                     'showingOlderMessages': self._transcript_end is not None,
@@ -633,6 +634,7 @@ class Controller:
                 if action == "send" or action == "job" and payload["command"] in ("set", "resume"):
                     with self._lock:
                         self._send_queued = False
+                    self.emit()
                 if action == "job":
                     with self._lock:
                         self.state["jobBusy"] = False

@@ -57,12 +57,12 @@ class BridgeHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         return result["secret"]
 
-    def auth(self, secret, body, request_id="request-1", nonce=None, timestamp=None):
+    def auth(self, secret, body, request_id="request-1", nonce=None, timestamp=None, path="/v1/submissions"):
         nonce = nonce or uuid4().hex
         timestamp = str(timestamp or int(time.time()))
         body_bytes = json.dumps(body, separators=(",", ":")).encode()
         digest = sha256(body_bytes).hexdigest()
-        signed = f"POST\n/v1/submissions\n{timestamp}\n{nonce}\n{request_id}\n{digest}".encode()
+        signed = f"POST\n{path}\n{timestamp}\n{nonce}\n{request_id}\n{digest}".encode()
         return {
             "X-Request-Id": request_id,
             "X-Steve-Timestamp": timestamp,
@@ -87,7 +87,7 @@ class BridgeHTTPTests(unittest.TestCase):
             "busy": False,
             "ready": False,
             "pairingId": None,
-            "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True},
+            "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "storageSettings": False, "autoSave": False, "autoReadOnly": False},
             "queueDepth": 0,
         })
         self.assertNotIn("secret", json.dumps(result).lower())
@@ -207,6 +207,23 @@ class BridgeHTTPTests(unittest.TestCase):
         self.bridge.configure('http://localhost:5173')
         self.assertEqual(event_request(payload)[0], 403)
 
+    def test_storage_is_authenticated_and_queued(self):
+        secret = self.pair()
+        self.bridge.storage = Obj(submit=Mock(return_value={"requestId":"storage-1", "pending":True}),
+                                  result=Mock(return_value={"requestId":"storage-1", "pending":False, "result":{"autoSave":True}}))
+        payload={"action":"getSettings"}
+        self.assertEqual(self.request('/v1/storage','POST',payload)[0],401)
+        headers=self.auth(secret,payload,request_id='storage-1',path='/v1/storage')
+        self.assertEqual(self.request('/v1/storage','POST',payload,headers)[0],202)
+        self.bridge.storage.submit.assert_called_once_with('storage-1',payload)
+        query={"requestId":"storage-1"}
+        headers=self.auth(secret,query,request_id='poll-1',path='/v1/storage/result')
+        self.assertTrue(self.request('/v1/storage/result','POST',query,headers)[2]['result']['autoSave'])
+        bad={"action":"deleteAll"}
+        headers=self.auth(secret,bad,request_id='bad',path='/v1/storage')
+        self.assertEqual(self.request('/v1/storage','POST',bad,headers)[0],400)
+        self.assertEqual(self.request('/v1/storage','OPTIONS')[0],204)
+
     def test_close_is_clean_and_idempotent(self):
         self.bridge.close()
         self.bridge.close()
@@ -214,6 +231,23 @@ class BridgeHTTPTests(unittest.TestCase):
 
 
 class MainThreadAdapterTests(unittest.TestCase):
+    def test_pending_autosave_does_not_self_schedule_queued_bridge_events(self):
+        from tests.test_clipboard_bridge import load_entry
+        entry = load_entry()
+        entry._running = True
+        entry._event_pending = False
+        entry._app = Obj(fireCustomEvent=Mock())
+        storage = Obj(decorate=lambda state:state, saving=lambda:True)
+        entry._external_bridge = Obj(storage=storage, feed=Obj(observe=Mock()),
+            connection_info=lambda:{'busy':False,'queueDepth':1})
+        entry._publish({})
+        entry._app.fireCustomEvent.assert_called_once_with(entry.EVENT_ID)
+        storage.saving=lambda:False
+        entry._event_pending=False
+        entry._app.fireCustomEvent.reset_mock()
+        entry._publish({})
+        self.assertEqual(entry._app.fireCustomEvent.call_count,2)
+
     def test_submission_message_defaults_to_current_folder_and_preserves_optional_target(self):
         current = Submission("one", "Make a bracket.", None, None, "Motor Mount")
         self.assertIn("Use the current Fusion Data Panel project and folder.", submission_message(current))
@@ -238,7 +272,9 @@ class MainThreadAdapterTests(unittest.TestCase):
         self.assertIn("Use the current Fusion Data Panel project and folder.", sent)
         self.assertIn("Requested design name: First Design", sent)
         self.assertTrue(sent.endswith("\nFirst"))
-        self.assertEqual(controller.dispatch.call_args.kwargs, {"capture_context": capture})
+        self.assertTrue(callable(controller.dispatch.call_args.kwargs["capture_context"]))
+        controller.dispatch.call_args.kwargs["capture_context"]("send")
+        capture.assert_called_once_with("send")
         bridge.requeue_commands.assert_called_once_with((submissions[1],))
 
     def test_adapter_does_not_dispatch_while_controller_is_busy(self):

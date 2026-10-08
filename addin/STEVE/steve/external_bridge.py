@@ -60,7 +60,7 @@ class BridgeCommand:
     submission: Submission
 
 
-def submission_message(submission):
+def submission_message(submission, managed_save=False):
     """Frame a Render Studio handoff without inventing a second controller path."""
     destination = "Use the current Fusion Data Panel project and folder."
     if submission.project_id or submission.folder_id:
@@ -68,6 +68,10 @@ def submission_message(submission):
             "Use the explicitly selected Autodesk destination below. Resolve it through the signed-in "
             "Fusion Data API before saving, and stop with a clear error instead of silently falling back."
         )
+    if managed_save:
+        destination = ("The bridge will autosave the pinned document after this response completes successfully. "
+                       "Do not call save, saveAs, move, or close the document. Work only in the pinned document. "
+                       "The bridge owns the selected save destination and reports save success or failure separately.")
     lines = [
         "[Render Studio CAD handoff]",
         destination,
@@ -149,6 +153,7 @@ class ExternalBridge:
         self._events = deque(maxlen=100)
         self._last_contact = None
         self.feed = RenderFeed()
+        self.storage = None
         self._port = port
         self._clock = clock
         self._lock = threading.Lock()
@@ -217,7 +222,7 @@ class ExternalBridge:
                 "busy": bool(readiness.get("busy", False)),
                 "ready": state.phase is ConnectionPhase.PAIRED and bool(readiness.get("providerReady", False)),
                 "pairingId": state.pairing_id,
-                "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True},
+                "capabilities": {"submitPrompt": True, "destinationMetadata": True, "createFolder": False, "chatEvents": True, "storageSettings": self.storage is not None, "autoSave": self.storage is not None, "autoReadOnly": False},
                 "queueDepth": len(self._commands),
             }
 
@@ -390,7 +395,7 @@ class ExternalBridge:
             with self._lock:
                 self._last_contact = self._clock()
             if handler.command == "OPTIONS":
-                if handler.path not in {"/v1/status", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions", "/v1/events"}:
+                if handler.path not in {"/v1/status", "/v1/pairing/request", "/v1/pairing/complete", "/v1/submissions", "/v1/events", "/v1/storage", "/v1/storage/result"}:
                     raise BridgeError(404, "not_found", "Route not found.")
                 self._send(handler, 204, None, origin)
                 return
@@ -417,6 +422,31 @@ class ExternalBridge:
                 if set(payload) != {"pairingId"}:
                     raise BridgeError(400, "invalid_request", "Invalid pairing completion.")
                 result, status = {"version": PROTOCOL_VERSION, "secret": self.complete_pairing(payload["pairingId"])}, 200
+            elif handler.command == "POST" and handler.path in {"/v1/storage", "/v1/storage/result"}:
+                request_id, _ = self._authenticate(handler, body)
+                payload = self._json(body)
+                if self.storage is None:
+                    raise BridgeError(503, "storage_unavailable", "Fusion storage is not available.")
+                try:
+                    if handler.path == "/v1/storage/result":
+                        if set(payload) != {"requestId"}:
+                            raise ValueError("Expected requestId only.")
+                        result = self.storage.result(_text(payload.get("requestId"), "requestId", 128, required=True))
+                    else:
+                        allowed = {"getSettings": {"action"}, "projects": {"action"},
+                                   "folders": {"action", "projectId", "folderId"},
+                                   "setSettings": {"action", "autoSave", "projectId", "folderId"},
+                                   "retrySave": {"action", "requestId"}}
+                        action = payload.get("action")
+                        if not isinstance(action, str) or action not in allowed or set(payload) - allowed[action]:
+                            raise ValueError("Invalid storage action or fields.")
+                        for field in ("projectId", "folderId", "requestId"):
+                            if field in payload:
+                                _text(payload[field], field, 2048)
+                        result = self.storage.submit(request_id, payload)
+                    status = 202 if result["pending"] else 200
+                except ValueError as error:
+                    raise BridgeError(400, "invalid_storage_request", str(error))
             elif handler.command == "POST" and handler.path == "/v1/events":
                 self._authenticate(handler, body)
                 payload = self._json(body)

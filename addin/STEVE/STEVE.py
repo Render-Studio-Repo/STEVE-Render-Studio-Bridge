@@ -15,6 +15,7 @@ from .steve.upgrade import migrate_data
 from .steve.app_update import launch_live_update
 from .steve.update_transaction import write_json
 from .steve.external_bridge import ExternalBridge, submission_message
+from .steve.render_storage import RenderStorage
 
 COMMAND_ID = "10X_STEVE_Open"
 PALETTE_ID = "10X_STEVE_Panel"
@@ -49,6 +50,8 @@ def _log_error():
 def _publish(state):
     global _pending_state, _event_pending
     if _external_bridge:
+        if _external_bridge.storage:
+            state = _external_bridge.storage.decorate(state)
         _external_bridge.feed.observe(state)
     bridge_status = _external_bridge.connection_info() if _external_bridge else None
     with _pending_lock:
@@ -59,7 +62,8 @@ def _publish(state):
     # Autodesk's supported exception for notifying the Fusion thread.
     try:
         _app.fireCustomEvent(EVENT_ID)
-        if _external_bridge and bridge_status and not bridge_status["busy"] and bridge_status["queueDepth"]:
+        if (_external_bridge and bridge_status and not bridge_status["busy"] and bridge_status["queueDepth"]
+                and not (_external_bridge.storage and _external_bridge.storage.saving())):
             _app.fireCustomEvent(BRIDGE_EVENT_ID)
     except RuntimeError:
         with _pending_lock:
@@ -131,16 +135,23 @@ class StateEvent(adsk.core.CustomEventHandler):
 
 
 def _dispatch_bridge_commands(bridge, controller, fusion_tools):
+    if getattr(bridge, "storage", None) and bridge.storage.saving():
+        return
     commands = bridge.drain_commands()
     if controller.state.get("busy"):
         bridge.requeue_commands(commands)
         return
     for index, command in enumerate(commands):
         if command.kind == "submit":
+            def capture(action):
+                context = fusion_tools.message_context(action)
+                if getattr(bridge, "storage", None):
+                    bridge.storage.track(command.submission, fusion_tools.document)
+                return context
             try:
-                accepted = controller.dispatch("send", {"text": submission_message(command.submission),
+                accepted = controller.dispatch("send", {"text": submission_message(command.submission, managed_save=bool(getattr(bridge, "storage", None) and bridge.storage.settings["autoSave"])),
                                                        "bridgeRequestId": command.submission.request_id},
-                                               capture_context=fusion_tools.message_context)
+                                               capture_context=capture)
             except Exception as error:
                 bridge.feed.fail(command.submission.request_id, error)
                 bridge.requeue_commands(commands[index + 1:])
@@ -163,6 +174,8 @@ class ExternalBridgeEvent(adsk.core.CustomEventHandler):
     def notify(self, args):
         try:
             if _external_bridge and _controller and _fusion_tools:
+                if _external_bridge.storage:
+                    _external_bridge.storage.run_main(allow_save=not _bridge_readiness()["busy"])
                 _dispatch_bridge_commands(_external_bridge, _controller, _fusion_tools)
                 _publish(_controller.snapshot())
         except Exception:
@@ -341,6 +354,8 @@ def run(context):
         _fusion_tools = FusionTools(_app)
         _controller = Controller(_publish, fusion_tools=_fusion_tools)
         _external_bridge = ExternalBridge(lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID), readiness=_bridge_readiness, config_path=data_home() / "render-bridge.json")
+        _external_bridge.storage = RenderStorage(_app, _external_bridge.feed,
+            data_home() / "render-storage.json", lambda: _app.fireCustomEvent(BRIDGE_EVENT_ID))
         try:
             _external_bridge.start()
         except OSError as error:
@@ -363,6 +378,8 @@ def run(context):
         def update_wake():
             while not _update_wake_stop.wait(1):
                 controller = _controller
+                if _external_bridge and _external_bridge.storage and _external_bridge.storage.pending():
+                    _app.fireCustomEvent(BRIDGE_EVENT_ID)
                 if controller and controller.state.get('updateInstallReady'):
                     _publish(controller.snapshot())
         threading.Thread(target=update_wake, daemon=True, name='STEVE-Update-Idle').start()

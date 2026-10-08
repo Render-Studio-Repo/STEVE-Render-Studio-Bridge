@@ -23,6 +23,20 @@ export function createSteveChatClient({secret, baseUrl = 'http://127.0.0.1:38173
   }
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   return {
+    async storage(payload, {requestId = crypto.randomUUID(), signal} = {}) {
+      let result = await signedPost('/v1/storage', payload, requestId, signal);
+      const deadline = Date.now() + 30000;
+      while (result.pending) {
+        if (Date.now() > deadline) {
+          const error = new Error('Fusion storage is still pending. Retry with the same requestId.');
+          error.requestId = requestId; throw error;
+        }
+        await delay(250);
+        result = await signedPost('/v1/storage/result', {requestId}, undefined, signal);
+      }
+      if (result.error) throw new Error(result.error);
+      return result.result;
+    },
     // Use the SAME requestId when retrying the SAME submission after a lost HTTP response.
     submit: (requestId, payload, signal) => signedPost('/v1/submissions', payload, requestId, signal),
     async watch(requestId, {onUpdate, onConnection = () => {}, signal} = {}) {

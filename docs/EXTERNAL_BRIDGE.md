@@ -10,7 +10,7 @@ Send `GET /v1/status` with the `Origin` header. The response reports protocol ve
 
 The connection phases are `unpaired`, `pairing_pending`, `pairing_approved`, `paired`, `pairing_denied`, and `stopped`.
 
-The default destination is the current Fusion Data Panel project and folder. A client may provide an existing Autodesk project and folder ID from an optional browser. STEVE resolves an explicit destination through the signed-in Fusion Data API and must report an error instead of silently falling back to the current folder. STEVE does not create Autodesk project folders in version 1. Check `capabilities.createFolder` before offering that action.
+The default destination for new documents is the current Fusion Data Panel project and folder unless the user has saved a default folder through the storage API. Existing documents save in place. A client may provide an existing Autodesk project and folder ID from an optional browser. With autosave enabled, the bridge resolves an explicit destination through the signed-in Fusion Data API before dispatch and rejects inaccessible folders. With autosave off, save instructions remain model guidance. STEVE does not create Autodesk project folders in version 1. Check `capabilities.createFolder` before offering that action.
 
 ## Pair Render Studio
 
@@ -57,7 +57,7 @@ The JSON body has this shape:
 
 The prompt limit is 32,000 characters. The complete body limit is 65,536 bytes. STEVE holds at most 16 accepted commands while Fusion is busy.
 
-STEVE frames the destination and requested name as delivery instructions before sending the request through its existing controller. With no IDs, it uses the Data Panel context captured when the prompt is accepted. With IDs, the model must resolve and verify that existing destination before saving.
+STEVE frames the destination and requested name before sending the request through its existing controller. With autosave enabled, saving is owned by the bridge rather than the model; see the autosave section below for destination precedence and existing-document behavior. With autosave disabled, these fields are instructions to the model and are not a deterministic save guarantee.
 
 ## Browser security rules
 
@@ -126,7 +126,7 @@ Response:
 Message events **replace/upsert** the text of that message ID. Never append their text
 as token deltas. Status events merge into the request's state; fields include `phase`,
 `status`, `error`, `waitingForFusion`, `waitingReason`, `targetDocument`, and `activeTools`.
-Phases: `queued`, `running`, `completed`, `failed`, `stopped`. Process the entire batch
+Phases: `queued`, `running`, `saving`, `completed`, `failed`, `stopped`. Process the entire batch
 before treating a terminal phase as finished: the final text can follow its status event.
 
 When `reset` is true, replace the local request state with `snapshot`. This occurs on
@@ -187,3 +187,109 @@ await client.watch(submissionId, {
 The two `update...` functions and secret retrieval in this snippet are integration points,
 not existing Render APIs. This repository implements the Fusion side and supplies the
 client; Render's deployed UI must wire it into its own Design Chat store/components.
+
+## Autosave and Render Settings folder picker
+
+With `capabilities.autoSave` and `capabilities.storageSettings`, STEVE autosaves the
+**pinned document after each successful Render response**, not on every token or at a
+fixed interval during modeling. Autosave is on by default; users can disable it. New
+unsaved documents use `saveAs` in a folder resolved and pinned when processing starts.
+Per-submission Autodesk project/folder IDs override the default setting. Otherwise the
+saved destination is used, or the then-current Data Panel folder if none is configured.
+Invalid explicit destinations fail before generation rather than falling back elsewhere.
+Existing saved documents get a new version **in their existing folder**; the setting
+never silently moves an existing design or creates a duplicate. Failed/stopped modeling
+responses do not trigger autosave. No new document is created by autosave itself.
+
+The model is instructed to leave saving to the bridge. If it saves a new document in a
+folder other than the pinned destination, autosave reports that mismatch; it does not move
+the file. The bridge waits for the target document and an idle Fusion command before
+saving and for `DataFile.isComplete` before reporting a confirmed cloud save. Uploads
+unconfirmed after 180 seconds report failure and leave the document intact. A failed save
+can be retried without rerunning the modeling prompt.
+
+### Storage endpoints
+
+All operations use the pairing secret and ordinary HMAC request headers. All Autodesk
+calls execute on Fusion's main thread; HTTP workers only queue requests.
+
+`POST /v1/storage` accepts these bodies:
+
+```json
+{"action":"getSettings"}
+{"action":"projects"}
+{"action":"folders","projectId":"autodesk-project-id","folderId":null}
+{"action":"folders","projectId":"autodesk-project-id","folderId":"autodesk-folder-id"}
+{"action":"setSettings","autoSave":true,"projectId":"autodesk-project-id","folderId":"autodesk-folder-id"}
+{"action":"setSettings","autoSave":true,"projectId":null,"folderId":null}
+{"action":"retrySave","requestId":"original-CAD-submission-id"}
+```
+
+`projects` lists projects in Fusion's **active hub**. Change hubs in Fusion if needed.
+`folders` returns the selected folder/project and its immediate child folders; a null
+folder selects the project root. This is a picker for existing folders; creation of new
+folders is not implemented (`createFolder: false`). Null project and folder settings mean
+“current Data Panel folder at request start.” Settings persist in `render-storage.json`
+in STEVE's data directory and apply to subsequent requests, without changing the pairing.
+They are shared by the paired browser's users of this local STEVE installation.
+
+A storage operation returns HTTP 202 with `{"requestId":"...","pending":true}`.
+Poll signed `POST /v1/storage/result` with `{"requestId":"..."}` until `pending:false`.
+The completed envelope contains `result` or `error`. Use a stable header `X-Request-Id`
+for retries of the SAME original storage operation. Result polls use fresh header IDs
+and nonces. Identical operation retries are idempotent during the in-memory retention
+window; changing the body under an existing ID is rejected. Keep the operation ID on
+network errors and avoid blindly creating another operation when an outcome is unknown.
+
+The supplied client handles this with `client.storage(payload, {requestId, signal})`.
+Mount the supplied folder settings component inside Render's own Settings page:
+
+```js
+import { createSteveChatClient } from './render-design-chat-client.js';
+import { mountSteveStorageSettings } from './render-storage-settings.js';
+const client = createSteveChatClient({secret: existingPairingSecret});
+await mountSteveStorageSettings(fusionSettingsContainer, client);
+```
+
+`fusionSettingsContainer` and secret retrieval are Render application integration points.
+The component supplies the autosave toggle, project picker, child-folder navigation, and
+save/default-location buttons. It does not deploy or modify Render's website by itself.
+
+### Design Chat save state and Personal Use limit
+
+Keep watching while phase is `saving`. The request's `save` object reports `pending`,
+`waiting`, `blocked`, `uploading`, `saved`, `unchanged`, or `failed`. Show it beneath the
+assistant response rather than claiming the file is saved when modeling first finishes.
+Confirmed saves include file/project/folder IDs and names. Save failure sets phase `failed`;
+show a “Retry save” control that calls `retrySave` and restarts the request watcher.
+
+When the Personal Use editable count reaches its maximum (usually 10), new-document
+saving reports `save.state: blocked`, `save.code: editable_limit`, the actual count/maximum,
+and `oldestEligible` when available. “Oldest” means least recently modified among editable
+files that are not open in this Fusion session and not reported in use by another user.
+Render should name that file and instruct the user to switch it to **Read-only** in Fusion's
+My Editable Documents. The bridge retries every five seconds after that manual action.
+For a read-only target, show the instruction to make the target editable.
+
+**Automatic read-only switching is not implemented.** Autodesk's public API exposes
+[`DataFile.isReadOnly`](https://help.autodesk.com/cloudhelp/ENU/Fusion-360-API/files/core_DataFile_isReadOnly.htm)
+as a read-only property. [`PersonalUseLimits`](https://help.autodesk.com/cloudhelp/ENU/Fusion-360-API/files/core_PersonalUseLimits.htm)
+provides the count and editable-file list but no supported method to demote a file.
+`capabilities.autoReadOnly` and `limits.canAutoMakeReadOnly` therefore remain false.
+Do not display an automatic-rotation toggle or bypass the license limit. No files are
+deleted, closed, or silently moved by this feature.
+
+### Render Studio settings integration
+
+The deployed Render Studio integration exposes these controls under **Account →
+Preferences → CAD & files → Fusion autosave**. It reuses the CAD engine connector's
+IndexedDB pairing and signs each storage endpoint with its own canonical path.
+Projects and subfolders come from the running local Fusion session. Browsing alone
+never changes the destination: select **Use this folder** to persist it, or **Use
+current Fusion Data Panel folder** to restore the default. The autosave checkbox
+persists immediately. Existing documents continue saving in place.
+
+Render's `submitCurrent` must omit project/folder IDs unless the user deliberately
+provides an override. Sending the current Data Panel IDs on every request would
+silently override the saved settings. The storage UI distinguishes the folder being
+browsed from the actual saved destination, and shows the editable document count.

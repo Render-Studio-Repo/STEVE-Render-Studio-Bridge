@@ -47,7 +47,7 @@ class RenderFeed:
             if not item or item["phase"] in {"completed", "failed", "stopped"}:
                 return
             busy = bool(state.get("busy") or state.get("jobBusy"))
-            phase = "running" if busy else "failed" if state.get("error") else "stopped" if state.get("status") == "Stopped" else "completed"
+            phase = "saving" if state.get("bridgeSaving") else "queued" if state.get("bridgeSendQueued") and not busy else "running" if busy else "failed" if state.get("error") else "stopped" if state.get("status") == "Stopped" else "completed"
             document = state.get("taskDocument") or {}
             summary = {"phase": phase, "status": redact(str(state.get("status", "")))[:1000],
                        "error": redact(str(state.get("error", "")))[:4000],
@@ -78,6 +78,18 @@ class RenderFeed:
                     self._event(request_id, "message", {"message": safe})
             item["messages"] = messages
             item["transcriptTruncated"] = offset > 1
+
+    def save_status(self, request_id, save, phase):
+        with self._lock:
+            item = self._requests.get(request_id)
+            if item is None:
+                return
+            status = {"phase": phase, "save": save, "error": ""}
+            if phase == "failed":
+                status["error"] = save.get("message", "Autosave failed")
+            if any(item.get(k) != v for k, v in status.items()):
+                item.update(deepcopy(status))
+                self._event(request_id, "status", status)
 
     def read(self, request_id, after):
         with self._lock:

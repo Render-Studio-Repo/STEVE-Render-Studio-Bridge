@@ -16,7 +16,11 @@ release downloads described below do not include this fork's bridge changes.
 This edition adds a clickable green/red/amber **Render** connection indicator, a saved
 Render instance address, a copyable connection debug log, and authenticated live chat
 updates for Render Design Chat. The feed includes assistant replies, tool activity,
-document waits, completion and errors. Render's website must wire in the
+document waits, completion and errors. It also adds completion autosave, a saved Fusion
+project/folder destination, and editable-limit guidance (read-only switching remains manual).
+In Render, open **Account → Preferences → CAD & files → Fusion autosave** to choose
+a destination. A [settings component](examples/render-storage-settings.js) is also supplied for other integrations.
+Render's website must wire in the
 [browser client](examples/render-design-chat-client.js) using the
 [Design Chat integration guide](docs/EXTERNAL_BRIDGE.md#live-design-chat-feed-capabilitieschatevents).
 
