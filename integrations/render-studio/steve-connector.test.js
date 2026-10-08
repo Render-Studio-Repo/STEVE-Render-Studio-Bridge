@@ -7,21 +7,38 @@ import { fileURLToPath } from "node:url";
 import {
   SteveConnector,
   classifySteveStatus,
+  deriveSteveSetupState,
   normalizeDesignName,
   signSteveSubmission,
   suggestedDesignName,
 } from "./steve-connector.js";
 
-const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "connector-fragment.html"), "utf8");
+const here = dirname(fileURLToPath(import.meta.url));
+const html = readFileSync(join(here, "connector-fragment.html"), "utf8");
+const source = readFileSync(join(here, "steve-connector.js"), "utf8");
 
-test("CAD picker exposes STEVE status, recovery, destination, and editable name controls", () => {
+test("CAD picker keeps STEVE compact and opens the Fusion-first setup flow", () => {
   assert.match(html, /data-cad-engine="steve"/);
   assert.match(html, /data-steve-status-dot/);
-  assert.match(html, /data-steve-connect/);
-  assert.match(html, /data-steve-design-name/);
-  assert.match(html, /Current Fusion project and folder/);
-  assert.match(html, /Settings.*CAD &amp; files/);
+  assert.match(html, /data-steve-setup>View setup/);
+  assert.match(source, /data-steve-setup-tab="fusion"/);
+  assert.match(source, /data-steve-setup-tab="steve"/);
+  assert.match(source, /data-steve-setup-tab="home"/);
+  assert.match(source, /Connect Fusion 360 first/);
+  assert.match(source, /Add Fusion tab to viewport/);
+  assert.match(source, /Open project homes/);
   assert.match(html, /https:\/\/github\.com\/wprojects\/STEVE-Render-Studio-Bridge/);
+});
+
+test("Fusion connection is the prerequisite for STEVE", () => {
+  assert.deepEqual(deriveSteveSetupState({ fusionLinked: false, steveState: "detected" }), {
+    fusionLinked: false,
+    fusionTabAttached: false,
+    canConnectSteve: false,
+    steveConnected: false,
+  });
+  assert.equal(deriveSteveSetupState({ fusionLinked: true, steveState: "ready", fusionTabAttached: true }).canConnectSteve, true);
+  assert.equal(deriveSteveSetupState({ fusionLinked: true, steveState: "ready", fusionTabAttached: true }).steveConnected, true);
 });
 
 function response(status, body) {

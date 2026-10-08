@@ -1,12 +1,14 @@
 # Render Studio frontend integration
 
 This directory packages the Render connector used with this fork: pairing, green/red/amber
-status, authenticated submissions, and storage RPC (including the native Fusion folder
+status, authenticated submissions, live Design Chat replies, and storage RPC (including the native Fusion folder
 picker). It is an integration bundle, not the entire Render Studio application.
 
 ## Files to deploy
 
-Copy `steve-connector.js` and `steve-connector.css` into Render's `frontend/cad/`.
+Copy `steve-connector.js`, `steve-chat-feed.js`, `steve-design-chat.js`,
+`steve-connector.css`, and `steve-setup.css` into Render's `frontend/cad/`.
+Load both stylesheets. Keep the three JavaScript modules together.
 Copy [`examples/render-storage-settings.js`](../../examples/render-storage-settings.js)
 to `frontend/cad/steve-storage-settings.js`. That example is the canonical settings source;
 there is intentionally no second copy here. Merge `connector-fragment.html` into the CAD
@@ -21,9 +23,11 @@ In `frontend/studio/app.js`, keep one integration promise for the page lifetime:
 ```js
 let steveIntegrationPromise;
 function getSteveIntegration() {
-  return steveIntegrationPromise ||= import('../cad/steve-connector.js?v=steve-storage-1')
-    .then(mod => mod.mountSteveConnector({
+  return steveIntegrationPromise ||= import('../cad/steve-design-chat.js?v=20261008-steve-chat3')
+    .then(mod => mod.mountSteveDesignChat({
       getPrompt: () => composer?.getPromptText?.() || '',
+      getFusionStatus: () => api('/api/autodesk/status'),
+      connectFusion: () => document.getElementById('btn-fusion-connect')?.click(),
       setPromptStatus: (tone, message) => {
         // Use the host application's existing composer status renderer.
         showComposerStatus(tone, message);
@@ -39,11 +43,16 @@ function getSteveIntegration() {
 ```
 
 `showComposerStatus` and `updateSteveEngineIndicator` above are host adapter placeholders.
+Supply `getFusionStatus` and `connectFusion` from the existing Autodesk integration;
+the setup dialog requires a linked Fusion account. The host also handles the existing
+`render3d:attach-cad-library` and `render3d:open-fusion-library` events to open its Fusion
+library/project-home UI. Retain the host's modal base styles (`auth-modal`, `auth-card`,
+`auth-backdrop`, and `hidden`) along with the bundled setup CSS.
 In the current Render implementation these map to the prompt status renderer and
 `steveConnectionState = snapshot.state; syncPromptActiveEngineIndicator()`.
 Set `integration.setActive(true)` while the CAD picker is open or STEVE is the selected
 workflow; set it false when both close. Set the engine button's `aria-pressed` when
-selecting STEVE. Route the composer send action to `integration.submitCurrent()` only
+selecting STEVE. Route the composer send action to `integration.submitCurrent({ owner, prompt })` only
 when STEVE is selected; surface rejected promises through the composer error UI.
 Do not route Jake/other engines through this method.
 
@@ -108,18 +117,71 @@ the user's manual Read-only toggle; this integration does not silently change fi
 
 ## Live Design Chat
 
-The connector submits jobs and reports connection state. To display assistant text and tool
-activity in Design Chat, also wire the [event client](../../examples/render-design-chat-client.js)
-according to the [feed guide](../../docs/EXTERNAL_BRIDGE.md#live-design-chat-feed-capabilitieschatevents).
-Reuse the existing paired secret and correlate events with the returned request ID. Installing
-this bundle alone does not persist messages into Render's conversation store.
+The Design Chat wrapper persists a request ID **before** submission, then watches the
+signed `/v1/events` feed through the existing paired connector. Tool activity, assistant
+text, waiting states, and failures update the same request instead of creating duplicate
+messages. Network reconnects never resubmit a modeling request.
+
+Capture the owner and prompt before awaiting anything in the STEVE send branch:
+
+```js
+const owner = { userId: String(currentUser.id), projectId: String(projectId) };
+const prompt = composer.getPromptText();
+const integration = await getSteveIntegration();
+await integration.setActive(true);
+await integration.submitCurrent({ owner, prompt });
+```
+
+In Render's `frontend/components/render-agent.js` (the Design Chat host), import:
+
+```js
+import { steveDesignChat, mountSteveReplyRecovery }
+  from '../cad/steve-design-chat.js?v=20261008-steve-chat3';
+const steveChatOwner = () => ({
+  userId: String(currentUserId() || ''),
+  projectId: String(getProjectId() || ''),
+});
+```
+
+Use the host's existing account/project getters. Merge
+`...steveDesignChat.messages(steveChatOwner())` into both the displayed message list and
+conversation context. Keep the existing escaped/Markdown message renderer; label messages
+with `message.steve` as STEVE. On chat open/project change, call
+`void steveDesignChat.resume(steveChatOwner())`.
+After mounting the conversation host:
+
+```js
+mountSteveReplyRecovery({ host, getOwner: steveChatOwner });
+window.addEventListener('render3d:steve-chat-updated', event => {
+  const owner = steveChatOwner();
+  if (event.detail.userId === owner.userId && event.detail.projectId === owner.projectId) {
+    renderDesignChat(host);
+  }
+});
+```
+
+Register this listener once per host and remove it if the host is unmounted. The recovery
+control uses `.prompt-design-header > div:first-child`; preserve that header slot in the
+host template. Its **Recover STEVE reply** action accepts a known bridge request ID and
+reads the retained feed without running the design again.
+
+Transcripts are stored in this browser's localStorage, scoped by account, project, and
+request. This is **not server-synced conversation history**. Completed history is bounded
+to 50 requests per account/project. Clearing site data removes it; unavailable/full storage
+shows a warning. Pairing secrets remain in IndexedDB and are not copied into chat records.
+Older replies can be recovered only while the running STEVE bridge still retains them.
+This watches Render-submitted requests; it does not mirror unrelated Fusion-only chats.
+
+Increment the host app and module query versions on deployment. A green connection badge
+alone does not verify chat rendering: the wrapper **and** host rendering hooks are required.
+See also the [protocol guide](../../docs/EXTERNAL_BRIDGE.md#live-design-chat-feed-capabilitieschatevents).
 
 ## Verification
 
 From the repository root:
 
 ```sh
-node --test integrations/render-studio/steve-connector.test.js
+node --test integrations/render-studio/*.test.js
 node tests/test_render_storage_settings.mjs
 node tests/test_render_chat_client.cjs
 ```
@@ -130,3 +192,8 @@ fragment. These tests do not establish an end-to-end modeling/cloud-save result.
 folder selection was observed during development; the subsequent extended timeout change
 was not rechecked with a second live modal selection. Render's broader verification had
 unrelated failures; this package does not claim the entire host application passes.
+
+Live verification: an existing completed STEVE reply and its tool activity were recovered
+into the original Render project without resubmission, and remained after browser refresh.
+The packaged targeted tests pass; broader Render checks still have failures/timeouts, so
+this is not a claim that all host application checks pass.

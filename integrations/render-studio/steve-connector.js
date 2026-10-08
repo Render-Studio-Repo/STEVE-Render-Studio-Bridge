@@ -1,3 +1,4 @@
+import { watchSteveChat } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 const DEFAULT_BASE_URL = "http://127.0.0.1:38173";
 const API_VERSION = "/v1";
 const SECRET_DB = "render-studio-steve";
@@ -347,7 +348,34 @@ export class SteveConnector {
     return result.result;
   }
 
-  async submit({ prompt, projectId, folderId, designName } = {}) {
+  async watch(requestId, options = {}) {
+    if (!this.secret) this.secret = await this.secretStore.read();
+    if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
+    try {
+      return await watchSteveChat({ ...options, requestId, post: async (payload, signal) => {
+      const body = JSON.stringify(payload);
+      const id = this.cryptoApi.randomUUID();
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const nonce = randomNonce(this.cryptoApi);
+      const signature = await signSteveSubmission({ secret: this.secret, body, requestId: id,
+        timestamp, nonce, cryptoApi: this.cryptoApi, path: "/v1/events" });
+      return this.request("/events", { method: "POST", body,
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
+        headers: { "Content-Type": "application/json", "X-Request-Id": id,
+          "X-Steve-Timestamp": timestamp, "X-Steve-Nonce": nonce, "X-Steve-Signature": signature } });
+      } });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) {
+        this.secret = null;
+        try { await this.secretStore.clear(); } catch {}
+        this.emit("detected", { error });
+        error.message = "Reconnect STEVE in the CAD engine menu, then recover this request.";
+      }
+      throw error;
+    }
+  }
+
+  async submit({ prompt, projectId, folderId, designName, requestId = this.cryptoApi.randomUUID() } = {}) {
     const cleanPrompt = String(prompt || "").trim();
     if (!cleanPrompt) throw new Error("Enter a CAD prompt before sending to STEVE.");
     if (!this.secret) throw new Error("Connect Render Studio to STEVE first.");
@@ -358,7 +386,6 @@ export class SteveConnector {
     const cleanName = normalizeDesignName(designName);
     if (cleanName) payload.designName = cleanName;
     const body = JSON.stringify(payload);
-    const requestId = this.cryptoApi.randomUUID();
     const timestamp = String(Math.floor(Date.now() / 1000));
     const nonce = randomNonce(this.cryptoApi);
     const signature = await signSteveSubmission({
@@ -401,42 +428,195 @@ function preciseUnavailableMessage() {
   return "Render Studio could not reach STEVE at 127.0.0.1:38173. Install STEVE, open Autodesk Fusion, sign in, and start the add-in. Your browser may also be blocking local-network access.";
 }
 
+export function deriveSteveSetupState({ fusionLinked = false, steveState = "unavailable", fusionTabAttached = false } = {}) {
+  return {
+    fusionLinked: !!fusionLinked,
+    fusionTabAttached: !!fusionTabAttached,
+    canConnectSteve: !!fusionLinked,
+    steveConnected: ["connected_not_ready", "ready", "busy"].includes(String(steveState)),
+  };
+}
+
+function isFusionTabAttached() {
+  try {
+    const state = JSON.parse(localStorage.getItem("render3d:cadLibraryDock:v1") || "{}");
+    return !!state?.fusion?.attached;
+  } catch {
+    return false;
+  }
+}
+
+function ensureSteveSetupDialog(root) {
+  let dialog = root?.getElementById?.("steve-setup-dialog");
+  if (dialog) return dialog;
+  dialog = root?.createElement?.("div");
+  if (!dialog) return null;
+  dialog.id = "steve-setup-dialog";
+  dialog.className = "auth-modal steve-setup-dialog hidden";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "steve-setup-title");
+  dialog.innerHTML = `
+    <div class="auth-backdrop" data-steve-setup-close></div>
+    <div class="auth-card app-dialog-card steve-setup-card">
+      <button type="button" class="auth-close" data-steve-setup-close aria-label="Close">&times;</button>
+      <p class="workspace-manage-eyebrow">Fusion workflow</p>
+      <h2 id="steve-setup-title" class="app-dialog-title">Set up STEVE</h2>
+      <div class="steve-setup-tabs" role="tablist" aria-label="STEVE setup steps">
+        <button type="button" role="tab" data-steve-setup-tab="fusion" aria-selected="true">1. Fusion 360</button>
+        <button type="button" role="tab" data-steve-setup-tab="steve" aria-selected="false">2. STEVE</button>
+        <button type="button" role="tab" data-steve-setup-tab="home" aria-selected="false">3. Project home</button>
+      </div>
+      <section class="steve-setup-pane" data-steve-setup-pane="fusion">
+        <h3>Connect Fusion 360 first</h3>
+        <p data-steve-fusion-status>Checking your Autodesk connection…</p>
+        <div class="steve-setup-actions">
+          <button type="button" class="btn primary" data-steve-connect-fusion>Connect Fusion 360</button>
+          <button type="button" class="btn secondary" data-steve-add-fusion-tab>Add Fusion tab to viewport</button>
+        </div>
+        <p class="muted small">The tab stays at the lower-left viewport edge so you can reopen Fusion projects without leaving your model.</p>
+      </section>
+      <section class="steve-setup-pane hidden" data-steve-setup-pane="steve">
+        <h3>Connect STEVE</h3>
+        <p data-steve-setup-recovery>Install STEVE, open Autodesk Fusion, sign in, and start the add-in.</p>
+        <button type="button" class="btn primary" data-steve-connect>Connect STEVE</button>
+        <label class="steve-setup-field">Design name
+          <input type="text" maxlength="96" data-steve-design-name placeholder="Auto-generated from your prompt" />
+        </label>
+      </section>
+      <section class="steve-setup-pane hidden" data-steve-setup-pane="home">
+        <h3>Select a project home</h3>
+        <p>Choose the Fusion hub, project, and folder used by this Render Studio project.</p>
+        <button type="button" class="btn primary" data-steve-open-project-homes>Open project homes</button>
+        <p class="muted small" data-steve-context>Choose a Fusion project home before sending work to STEVE.</p>
+      </section>
+    </div>
+  `;
+  root.body?.appendChild?.(dialog);
+  return dialog;
+}
+
 export function mountSteveConnector({
   root = globalThis.document,
   getPrompt = () => "",
   setPromptStatus = () => {},
+  getFusionStatus = async () => ({ linked: false }),
+  connectFusion = () => {},
   connectorOptions = {},
 } = {}) {
+  const setupDialog = ensureSteveSetupDialog(root);
   const dot = root?.querySelector?.("[data-steve-status-dot]");
   const label = root?.querySelector?.("[data-steve-status-label]");
   const recovery = root?.querySelector?.("[data-steve-recovery]");
-  const context = root?.querySelector?.("[data-steve-context]");
-  const designName = root?.querySelector?.("[data-steve-design-name]");
-  const pairButton = root?.querySelector?.("[data-steve-connect]");
+  const setupButton = root?.querySelector?.("[data-steve-setup]");
+  const context = setupDialog?.querySelector?.("[data-steve-context]");
+  const setupRecovery = setupDialog?.querySelector?.("[data-steve-setup-recovery]");
+  const designName = setupDialog?.querySelector?.("[data-steve-design-name]");
+  const pairButton = setupDialog?.querySelector?.("[data-steve-connect]");
+  const fusionStatus = setupDialog?.querySelector?.("[data-steve-fusion-status]");
+  const connectFusionButton = setupDialog?.querySelector?.("[data-steve-connect-fusion]");
+  const addFusionTabButton = setupDialog?.querySelector?.("[data-steve-add-fusion-tab]");
+  let fusionLinked = false;
+  let lastSnapshot = { state: "unavailable", recovery: STEVE_STATE_VIEW.unavailable.recovery };
+
+  function selectSetupTab(tab) {
+    const next = ["fusion", "steve", "home"].includes(tab) ? tab : "fusion";
+    setupDialog?.querySelectorAll?.("[data-steve-setup-tab]").forEach((button) => {
+      button.setAttribute("aria-selected", String(button.dataset.steveSetupTab === next));
+    });
+    setupDialog?.querySelectorAll?.("[data-steve-setup-pane]").forEach((pane) => {
+      pane.classList.toggle("hidden", pane.dataset.steveSetupPane !== next);
+    });
+  }
+
+  function renderSetupState() {
+    const state = deriveSteveSetupState({
+      fusionLinked,
+      steveState: lastSnapshot.state,
+      fusionTabAttached: isFusionTabAttached(),
+    });
+    if (fusionStatus) fusionStatus.textContent = state.fusionLinked
+      ? "Fusion 360 is connected."
+      : "Fusion 360 is required before STEVE can connect.";
+    if (connectFusionButton) connectFusionButton.hidden = state.fusionLinked;
+    if (addFusionTabButton) {
+      addFusionTabButton.disabled = !state.fusionLinked || state.fusionTabAttached;
+      addFusionTabButton.textContent = state.fusionTabAttached ? "Fusion tab added" : "Add Fusion tab to viewport";
+    }
+    if (pairButton) {
+      pairButton.hidden = state.steveConnected;
+      pairButton.disabled = !state.canConnectSteve || lastSnapshot.state === "pairing";
+      pairButton.textContent = lastSnapshot.state === "pairing" ? "Approve in Fusion…" : "Connect STEVE";
+    }
+    if (setupRecovery) setupRecovery.textContent = lastSnapshot.state === "unavailable"
+      ? preciseUnavailableMessage()
+      : lastSnapshot.error?.message || lastSnapshot.recovery;
+    if (recovery) recovery.textContent = state.fusionLinked
+      ? (state.steveConnected ? "Fusion and STEVE are ready." : "Fusion connected. Finish STEVE setup.")
+      : "Connect Fusion 360 first, then finish STEVE setup.";
+  }
+
+  async function refreshFusionStatus() {
+    if (fusionStatus) fusionStatus.textContent = "Checking your Autodesk connection…";
+    try {
+      const status = await getFusionStatus();
+      fusionLinked = !!status?.linked;
+    } catch {
+      fusionLinked = false;
+    }
+    renderSetupState();
+    return fusionLinked;
+  }
+
   const connector = new SteveConnector({
     ...connectorOptions,
     onChange(snapshot) {
+      lastSnapshot = snapshot;
       connectorOptions.onChange?.(snapshot);
       if (dot) dot.dataset.tone = snapshot.tone;
       if (label) label.textContent = snapshot.label;
-      if (recovery) recovery.textContent = snapshot.state === "unavailable"
-        ? preciseUnavailableMessage()
-        : snapshot.error?.message || snapshot.recovery;
       const current = snapshot.status?.currentContext || snapshot.status?.context || {};
       const destination = current.projectName || current.folderName
         ? [current.projectName, current.folderName].filter(Boolean).join(" / ")
         : "Current Fusion project and folder";
       if (context) context.textContent = `${destination}. Configure new-document saves in Settings → CAD & files.`;
-      if (pairButton) {
-        pairButton.hidden = snapshot.state === "ready" || snapshot.state === "busy" || snapshot.state === "connected_not_ready";
-        pairButton.disabled = snapshot.state === "pairing";
-        pairButton.textContent = snapshot.state === "pairing" ? "Approve in Fusion…" : "Connect STEVE";
-      }
+      renderSetupState();
     },
   });
-  pairButton?.addEventListener?.("click", (event) => {
+  setupDialog?.querySelectorAll?.("[data-steve-setup-close]").forEach((button) => {
+    button.addEventListener("click", () => setupDialog.classList.add("hidden"));
+  });
+  setupDialog?.querySelectorAll?.("[data-steve-setup-tab]").forEach((button) => {
+    button.addEventListener("click", () => selectSetupTab(button.dataset.steveSetupTab));
+  });
+  setupButton?.addEventListener?.("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    setupDialog?.classList.remove("hidden");
+    selectSetupTab("fusion");
+    if (designName && !designName.value) designName.value = suggestedDesignName(getPrompt());
+    void refreshFusionStatus();
+  });
+  connectFusionButton?.addEventListener?.("click", () => {
+    setupDialog?.classList.add("hidden");
+    connectFusion();
+  });
+  addFusionTabButton?.addEventListener?.("click", () => {
+    window.dispatchEvent(new CustomEvent("render3d:attach-cad-library", { detail: { cadId: "fusion", open: false } }));
+    renderSetupState();
+  });
+  setupDialog?.querySelector?.("[data-steve-open-project-homes]")?.addEventListener?.("click", () => {
+    setupDialog.classList.add("hidden");
+    window.dispatchEvent(new CustomEvent("render3d:open-fusion-library"));
+  });
+  pairButton?.addEventListener?.("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!await refreshFusionStatus()) {
+      selectSetupTab("fusion");
+      setPromptStatus("error", "Connect Fusion 360 before connecting STEVE.");
+      return;
+    }
     void connector.pair().catch((error) => setPromptStatus("error", error?.message || "Could not connect STEVE."));
   });
   return {
@@ -449,10 +629,11 @@ export function mountSteveConnector({
       connector.deactivate();
       return connector.snapshot();
     },
-    async submitCurrent() {
+    async submitCurrent({ prompt = getPrompt(), requestId } = {}) {
       const result = await connector.submit({
-        prompt: getPrompt(),
-        designName: designName?.value || suggestedDesignName(getPrompt()),
+        prompt,
+        requestId,
+        designName: designName?.value || suggestedDesignName(prompt),
       });
       setPromptStatus("ok", result.message || "Prompt sent to STEVE in Fusion.");
       return result;

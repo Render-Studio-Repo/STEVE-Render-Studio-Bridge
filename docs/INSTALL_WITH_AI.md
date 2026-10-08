@@ -56,11 +56,13 @@ Installation enables the Fusion-side feed; it does not automatically update Rend
 website. Wire the authenticated live feed into Render's Design Chat using:
 
 - [Protocol and step-by-step wiring instructions](EXTERNAL_BRIDGE.md#live-design-chat-feed-capabilitieschatevents)
-- [Dependency-free browser client](../examples/render-design-chat-client.js)
+- [Production frontend bundle and Design Chat rendering hooks](../integrations/render-studio/README.md#live-design-chat)
+- [Dependency-free protocol example](../examples/render-design-chat-client.js)
 
 The client polls at 250 ms, correlates updates to the submitted request ID, and supports
-cursor recovery. Render must render incoming messages and save them to its conversation
-store. A prompt using **Jake** is not routed to STEVE, regardless of its AI model selection.
+cursor recovery. The production bundle renders replies through the host hooks and keeps
+account/project-scoped history in browser localStorage; it is not server-synced history.
+Deploy both the chat wrapper and rendering hooks, then refresh the Render page. A prompt using **Jake** is not routed to STEVE, regardless of its AI model selection.
 
 ## Render developers: connection and storage UI
 

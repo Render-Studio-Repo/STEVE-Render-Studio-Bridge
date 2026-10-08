@@ -1,0 +1,204 @@
+import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-steve-chat2";
+import { isSteveChatComplete } from "./steve-chat-feed.js?v=20261008-steve-chat2";
+
+const PREFIX = "render3d:steveDesignChat:v1:";
+const requestPattern = /^[a-zA-Z0-9_-]{8,128}$/;
+function ownerKey({ userId, projectId }) {
+  if (!userId || !projectId) throw new Error("Sign in and open a Render project first.");
+  return PREFIX + encodeURIComponent(userId) + ":" + encodeURIComponent(projectId) + ":";
+}
+function recordKey(owner, requestId) {
+  if (!requestPattern.test(requestId)) throw new Error("Enter a valid STEVE request ID.");
+  return ownerKey(owner) + requestId;
+}
+
+export class SteveDesignChat {
+  constructor({ storage, createConnector = () => new SteveConnector(), onChange = () => {} } = {}) {
+    this.storage = storage;
+    this.createConnector = createConnector;
+    this.onChange = onChange;
+    this.running = new Map();
+    this.memory = new Map();
+    this.notified = new Map();
+  }
+  get store() { return this.storage || globalThis.localStorage; }
+  records(owner) {
+    if (!owner.userId || !owner.projectId) return [];
+    const prefix = ownerKey(owner);
+    const records = new Map();
+    try {
+      for (let i = 0; i < this.store.length; i++) {
+        const key = this.store.key(i);
+        if (!key?.startsWith(prefix)) continue;
+        try {
+          const record = JSON.parse(this.store.getItem(key));
+          if (record.userId === String(owner.userId) && record.projectId === String(owner.projectId)) records.set(key, record);
+        } catch {}
+      }
+    } catch {}
+    for (const [key, record] of this.memory) if (key.startsWith(prefix)) records.set(key, record);
+    return [...records.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  write(record) {
+    const key = recordKey(record, record.requestId);
+    this.memory.set(key, record);
+    const { persistenceWarning: ignoredWarning, ...saved } = record;
+    const serialized = JSON.stringify(saved);
+    try {
+      const oldCompleted = this.records(record).filter(item => isSteveChatComplete(item.snapshot)
+        && item.requestId !== record.requestId).slice(0, -49);
+      for (const old of oldCompleted) {
+        const oldKey = recordKey(old, old.requestId);
+        this.store.removeItem(oldKey);
+        this.memory.delete(oldKey);
+        this.notified.delete(oldKey);
+      }
+      if (this.store.getItem(key) !== serialized) this.store.setItem(key, serialized);
+      record.persistenceWarning = "";
+    } catch {
+      record.persistenceWarning = "Browser storage is full or unavailable. This reply is visible now, but its latest text may not survive refresh.";
+    }
+    const notification = serialized + record.persistenceWarning;
+    if (this.notified.get(key) !== notification) {
+      this.notified.set(key, notification);
+      this.onChange({ userId: record.userId, projectId: record.projectId, requestId: record.requestId });
+    }
+    return record;
+  }
+  remember(owner, requestId, prompt = "") {
+    recordKey(owner, requestId);
+    const previous = this.records(owner).find(record => record.requestId === requestId);
+    if (previous) return previous;
+    return this.write({ userId: String(owner.userId), projectId: String(owner.projectId), requestId,
+      prompt: String(prompt), createdAt: new Date().toISOString(), snapshot: null, connection: "connecting", error: "" });
+  }
+  messages(owner) {
+    return this.records(owner).flatMap(record => {
+      const source = record.snapshot?.messages || [];
+      const messages = source.map(message => ({
+        role: message.role === "user" ? "user" : "assistant",
+        content: message.role === "tool"
+          ? [message.title || message.tool || "Tool", message.toolStatus, message.text].filter(Boolean).join(" · ")
+          : String(message.text || ""),
+        steve: true, requestId: record.requestId, messageId: message.id,
+        projectId: record.projectId, userId: record.userId,
+      })).filter(message => message.content);
+      if (!source.some(message => message.role === "user") && record.prompt) {
+        messages.unshift({ role: "user", content: record.prompt, steve: true, projectId: record.projectId, requestId: record.requestId });
+      }
+      const progress = record.error || record.snapshot?.error || (
+        record.connection === "reconnecting" ? "Reconnecting to STEVE…" :
+        record.snapshot?.waitingForFusion ? record.snapshot.waitingReason || "Waiting for Fusion…" :
+        !isSteveChatComplete(record.snapshot) ? record.snapshot?.status || "Waiting for STEVE reply…" : ""
+      );
+      if (record.persistenceWarning) messages.push({ role: "assistant", content: record.persistenceWarning,
+        steve: true, projectId: record.projectId, requestId: record.requestId });
+      if (progress) messages.push({ role: "assistant", content: progress, steve: true,
+        projectId: record.projectId, requestId: record.requestId });
+      return messages;
+    });
+  }
+  watch(record, connector = this.createConnector()) {
+    const key = recordKey(record, record.requestId);
+    if (this.running.has(key)) return this.running.get(key).promise;
+    const controller = new AbortController();
+    const run = { controller };
+    this.running.set(key, run);
+    run.promise = Promise.resolve().then(() => connector.watch(record.requestId, {
+      signal: controller.signal,
+      onUpdate: snapshot => { record.snapshot = snapshot; record.error = ""; this.write(record); },
+      onConnection: (connection, error) => {
+        if (record.connection === connection && record.error === (error?.message || "")) return;
+        record.connection = connection;
+        record.error = connection === "connected" ? "" : error?.message || "";
+        this.write(record);
+      },
+    })).catch(error => {
+      if (!controller.signal.aborted) {
+        record.connection = "action-required";
+        record.error = error.status === 404 ? "STEVE no longer has this request, or needs an update. Reconnect and recover by request ID." : error.message;
+        this.write(record);
+      }
+    }).finally(() => this.running.delete(key));
+    return run.promise;
+  }
+  recover(owner, requestId) {
+    const record = this.remember({ ...owner }, requestId);
+    return this.watch(record);
+  }
+  resume(owner) {
+    return Promise.all(this.records(owner).filter(record => !isSteveChatComplete(record.snapshot) && !record.rejected)
+      .map(record => this.watch(record)));
+  }
+  async submit(integration, { owner, prompt, requestId = globalThis.crypto.randomUUID() }) {
+    const record = this.remember({ ...owner }, requestId, prompt);
+    if (record.persistenceWarning) throw new Error("Cannot save the STEVE request ID. Free browser storage before sending.");
+    try {
+      const result = await integration.submitCurrent({ prompt, requestId });
+      void this.watch(record, integration.connector);
+      return result;
+    } catch (error) {
+      record.error = error.message;
+      record.rejected = Boolean(error.status && error.status < 500);
+      this.write(record);
+      if (!record.rejected) void this.watch(record, integration.connector);
+      throw error;
+    }
+  }
+  dispose() {
+    for (const run of this.running.values()) run.controller.abort();
+  }
+}
+
+export const steveDesignChat = new SteveDesignChat({
+  onChange: detail => globalThis.window?.dispatchEvent(new CustomEvent("render3d:steve-chat-updated", { detail })),
+});
+
+export function mountSteveDesignChat(options) {
+  const integration = mountSteveConnector(options);
+  return { ...integration, submitCurrent: packet => steveDesignChat.submit(integration, packet) };
+}
+
+export function mountSteveReplyRecovery({ host, getOwner }) {
+  const panel = document.createElement("details");
+  panel.dataset.steveReplyRecovery = "1";
+  panel.style.minWidth = "0";
+  const summary = document.createElement("summary");
+  summary.textContent = "Recover STEVE reply";
+  const label = document.createElement("label");
+  label.textContent = "STEVE request ID ";
+  label.style.display = "grid";
+  label.style.gap = "4px";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.style.width = "100%";
+  input.style.boxSizing = "border-box";
+  input.placeholder = "Paste the request ID";
+  input.setAttribute("aria-label", "STEVE request ID");
+  input.dataset.steveRecoveryRequest = "1";
+  label.append(input);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn secondary btn-compact";
+  button.textContent = "Recover reply";
+  button.dataset.steveRecover = "1";
+  const status = document.createElement("p");
+  status.setAttribute("role", "status");
+  status.style.fontSize = "12px";
+  status.style.overflowWrap = "anywhere";
+  panel.append(summary, label, button, status);
+  host.querySelector(".prompt-design-header > div:first-child").append(panel);
+  button.addEventListener("click", async () => {
+    const owner = { ...getOwner() };
+    const requestId = input.value.trim();
+    button.disabled = true;
+    status.textContent = "Reading this request from STEVE…";
+    try {
+      await steveDesignChat.recover(owner, requestId);
+      const record = steveDesignChat.records(owner).find(item => item.requestId === requestId);
+      status.textContent = record?.error || record?.persistenceWarning || "Reply recovered for the original Render project.";
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+  globalThis.window?.addEventListener("pagehide", () => steveDesignChat.dispose(), { once: true });
+}

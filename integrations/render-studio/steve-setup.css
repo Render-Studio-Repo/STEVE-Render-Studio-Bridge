@@ -1,0 +1,92 @@
+.steve-setup-dialog {
+  z-index: 12100;
+}
+
+.steve-setup-card {
+  width: min(620px, calc(100vw - 24px));
+  max-height: min(82vh, 680px);
+  overflow: auto;
+}
+
+.steve-setup-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 18px 0 16px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(9, 14, 20, 0.72);
+}
+
+.steve-setup-tabs button {
+  min-width: 0;
+  padding: 9px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.steve-setup-tabs button[aria-selected="true"] {
+  border-color: rgba(255, 145, 28, 0.62);
+  background: rgba(255, 145, 28, 0.13);
+  color: #ffd29a;
+}
+
+.steve-setup-pane {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(16, 22, 29, 0.92);
+}
+
+.steve-setup-pane.hidden {
+  display: none;
+}
+
+.steve-setup-pane h3,
+.steve-setup-pane p {
+  margin: 0;
+}
+
+.steve-setup-pane p {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.steve-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.steve-setup-field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.steve-setup-field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #0d1117;
+  color: var(--text);
+}
+
+@media (max-width: 560px) {
+  .steve-setup-tabs {
+    grid-template-columns: 1fr;
+  }
+}

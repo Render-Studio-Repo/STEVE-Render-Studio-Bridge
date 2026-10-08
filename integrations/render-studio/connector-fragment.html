@@ -1,4 +1,4 @@
-<!-- Insert in the CAD engine picker; load steve-connector.css once. -->
+<!-- Insert in the CAD engine picker; load steve-connector.css and steve-setup.css once. -->
 <button type="button" class="prompt-cad-engine-option prompt-cad-engine-option--steve"
   data-cad-engine="steve" aria-pressed="false">
   <span class="prompt-cad-engine-option-top">
@@ -12,8 +12,6 @@
 </button>
 <div class="steve-engine-workflow" data-steve-workflow>
   <a href="https://github.com/wprojects/STEVE-Render-Studio-Bridge" target="_blank" rel="noopener noreferrer">Install STEVE for Fusion</a>
-  <p data-steve-recovery>Install STEVE, open Fusion, sign in, and start the add-in.</p>
-  <button type="button" class="steve-engine-connect" data-steve-connect>Connect STEVE</button>
-  <label>Design name <input type="text" maxlength="96" data-steve-design-name placeholder="Auto-generated from your prompt" /></label>
-  <p data-steve-context>Current Fusion project and folder. Choose autosave and a new-document folder in Settings → CAD &amp; files.</p>
+  <p data-steve-recovery>Connect Fusion 360 first, then finish STEVE setup.</p>
+  <button type="button" class="steve-engine-connect" data-steve-setup>View setup</button>
 </div>

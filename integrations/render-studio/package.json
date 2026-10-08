@@ -1,1 +1,7 @@
-{"private":true,"type":"module","scripts":{"test":"node --test steve-connector.test.js"}}
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test *.test.js"
+  }
+}
