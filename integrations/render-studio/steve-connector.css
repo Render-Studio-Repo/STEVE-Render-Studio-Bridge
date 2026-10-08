@@ -1,0 +1,80 @@
+.prompt-cad-engine-option--steve .prompt-cad-engine-option-top {
+  justify-content: space-between;
+}
+
+.steve-engine-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.steve-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: #f85149;
+  box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.13);
+}
+
+.steve-status-dot[data-tone="amber"] {
+  background: #d29922;
+  box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.14);
+}
+
+.steve-status-dot[data-tone="green"] {
+  background: #3fb950;
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.14);
+}
+
+.steve-engine-workflow {
+  display: none;
+  gap: 7px;
+  margin: -2px 0 7px;
+  padding: 9px 10px 10px;
+  border: 1px solid rgba(88, 166, 255, 0.28);
+  border-top: 0;
+  border-radius: 0 0 12px 12px;
+  background: rgba(13, 17, 23, 0.92);
+}
+
+.prompt-cad-engine-option--steve[aria-pressed="true"] + .steve-engine-workflow {
+  display: grid;
+}
+
+.steve-engine-workflow label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.steve-engine-workflow input {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0d1117;
+  color: var(--text);
+}
+
+.steve-engine-workflow p {
+  margin: 0;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.steve-engine-connect {
+  justify-self: start;
+  padding: 6px 9px;
+  border: 1px solid rgba(88, 166, 255, 0.45);
+  border-radius: 8px;
+  background: rgba(88, 166, 255, 0.12);
+  color: #9ecbff;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 750;
+  cursor: pointer;
+}

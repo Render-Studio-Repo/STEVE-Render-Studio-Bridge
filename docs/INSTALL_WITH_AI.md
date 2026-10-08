@@ -61,3 +61,10 @@ website. Wire the authenticated live feed into Render's Design Chat using:
 The client polls at 250 ms, correlates updates to the submitted request ID, and supports
 cursor recovery. Render must render incoming messages and save them to its conversation
 store. A prompt using **Jake** is not routed to STEVE, regardless of its AI model selection.
+
+## Render developers: connection and storage UI
+
+Use the [Render frontend bundle](../integrations/render-studio/README.md) for the actual
+connector, status markup/CSS, Preferences integration, and native Fusion folder picker.
+The bundle reuses the existing paired connection. Choose a destination and press **Use
+this folder** to save it; existing documents continue saving in their original location.

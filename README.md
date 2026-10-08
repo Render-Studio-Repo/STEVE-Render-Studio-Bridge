@@ -20,6 +20,8 @@ document waits, completion and errors. It also adds completion autosave, a saved
 project/folder destination, and editable-limit guidance (read-only switching remains manual).
 In Render, open **Account → Preferences → CAD & files → Fusion autosave** to choose
 a destination. A [settings component](examples/render-storage-settings.js) is also supplied for other integrations.
+The [Render frontend bundle and wiring guide](integrations/render-studio/README.md) includes
+the connector, status UI, and native Fusion folder-picker integration.
 Render's website must wire in the
 [browser client](examples/render-design-chat-client.js) using the
 [Design Chat integration guide](docs/EXTERNAL_BRIDGE.md#live-design-chat-feed-capabilitieschatevents).
