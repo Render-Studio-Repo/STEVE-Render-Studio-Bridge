@@ -17,6 +17,7 @@ export function bindingError(code, binding) {
     project_mismatch: `STEVE is locked to project #${binding?.renderProjectId || ''}. Open locked project to send. Your draft stays here.`,
     project_binding_changed: 'The STEVE project lock changed. Review the lock and try again.',
     project_busy: 'STEVE is busy. Wait for the current request to finish before changing projects.',
+    project_not_finished: 'STEVE has not finished the current request. Keep its project connected and try again after it finishes.',
     project_binding_unavailable: 'Update STEVE to use project locking before sending.',
   };
   return Object.assign(new Error(messages[code] || code), { code, status: 409 });
@@ -25,7 +26,7 @@ export function bindingError(code, binding) {
 export class SteveProjectBinding {
   constructor() {
     this.binding = null; this.known = false; this.generation = 0; this.sequence = 0; this.applied = 0;
-    this.listeners = new Set(); this.pending = null; this.changing = false; this.busy = false;
+    this.listeners = new Set(); this.pending = null; this.changing = false; this.busy = false; this.availableForProjectChange = false;
   }
   subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   emit() { for (const listener of this.listeners) listener(this); }
@@ -36,17 +37,20 @@ export class SteveProjectBinding {
     const next = validateSteveBinding(packet);
     this.applied = token.sequence;
     const changed = !this.known || JSON.stringify(next) !== JSON.stringify(this.binding);
+    const busy = packet.busy === true;
+    const available = Boolean(next && packet.busy === false && packet.availableForProjectChange === true);
+    const metadataChanged = busy !== this.busy || available !== this.availableForProjectChange;
     this.binding = next; this.known = true;
-    if (changed) { this.generation++; this.pending = null; this.busy = false; this.emit(); }
+    this.busy = busy; this.availableForProjectChange = available;
+    if (changed) { this.generation++; this.pending = null; }
+    if (changed || metadataChanged) this.emit();
     return true;
   }
-  reset() { this.generation++; this.changing = false; this.known = false; this.binding = null; this.pending = null; this.busy = false; this.emit(); }
+  reset() { this.generation++; this.changing = false; this.known = false; this.binding = null; this.pending = null; this.busy = false; this.availableForProjectChange = false; this.emit(); }
   async refresh(connector) {
     const token = this.beginRead();
     const packet = await connector.project({ action: 'get' });
     if (!this.accept(packet, token)) throw bindingError('project_binding_changed', this.binding);
-    this.busy = Boolean(connector.status?.busy || Number(connector.status?.queueDepth || 0) > 0);
-    this.emit();
     return this.binding;
   }
   assertOwner(owner, revision) {
@@ -57,12 +61,12 @@ export class SteveProjectBinding {
     if (this.changing) throw bindingError('project_binding_changed', this.binding);
     return this.binding.revision;
   }
-  prepare(owner) {
+  prepare(owner, { requireAvailable = false } = {}) {
     if (!this.known) throw bindingError('project_binding_unavailable');
     if (!owner?.userId || !owner?.projectId) throw new Error('Sign in and open a Render project first.');
     if (this.busy || this.changing) throw bindingError('project_busy');
     this.pending = Object.freeze({ action: 'bind', renderUserId: String(owner.userId), renderProjectId: String(owner.projectId),
-      expectedRevision: this.binding?.revision ?? null });
+      expectedRevision: this.binding?.revision ?? null, ...(requireAvailable === true ? { requireAvailable: true } : {}) });
     this.emit();
     return this.pending;
   }

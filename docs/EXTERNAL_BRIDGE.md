@@ -34,6 +34,18 @@ Signed `POST /v1/project` with `{"action":"get"}` returns
 and `revision`. Render displays the bound project name and ID even when the user
 views another project.
 
+The project and activity packets also report `busy` and `availableForProjectChange`.
+Availability becomes true after the latest bound request completes successfully,
+with no queued work, active tools, pending message deliveries, preview exports,
+or save operations. Preview completion means the export is ready in the bridge
+cache; it is not a browser delivery acknowledgment. A failed or stopped request is not advertised as finished.
+The final binding remains intact so its chat and model can still arrive. After availability is confirmed, an explicit new Send in another project of the
+same account may claim the bridge using the current revision. The server checks
+for new busy work again before accepting that handoff. Automatic handoffs include
+`requireAvailable: true`; the server atomically rechecks completion and returns
+`409 project_not_finished` if the request is no longer finished. Browsing alone never
+transfers it; requests already carrying a revision cannot silently reclaim it. Treat missing availability metadata as unavailable.
+
 An explicit project-selection confirmation sends:
 
 ```json
@@ -221,7 +233,7 @@ The copy-debug-log feature remains connection-only.
 
 Signed `POST /v1/activity` accepts exactly
 `{"renderUserId":"<current Render account>","after":0}`. It returns
-`{version:1,cursor,epoch,reset,requests,binding}`. Each entry in `requests` is a full public
+`{version:1,cursor,epoch,reset,requests,binding,busy,availableForProjectChange}`. Each entry in `requests` is a full public
 request snapshot with its original `requestId`, `renderUserId`, `renderProjectId`,
 and messages. Results are filtered to the bound account and project. Unbound or
 other-account activity returns no requests; unowned legacy requests are excluded. This is a read-only endpoint and never starts modeling work.

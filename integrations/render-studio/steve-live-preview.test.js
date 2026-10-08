@@ -39,19 +39,38 @@ test("live previews stay pinned to their original user and Render project", asyn
 test("preview layer reuses the host scene and disposes replaced geometry", () => {
   const removed = [];
   const scene = { add(value) { this.value = value; }, remove(value) { removed.push(value); } };
-  class Group { constructor() { this.children = []; this.userData = {}; } add(value) { this.children.push(value); } traverse(fn) { fn(this); this.children.forEach(fn); } }
+  class Group { constructor() { this.children = []; this.userData = {}; this.position = { x: 0, y: 0, z: 0, set(x,y,z) { Object.assign(this,{x,y,z}); } }; } add(value) { this.children.push(value); } traverse(fn) { fn(this); this.children.forEach(fn); } }
   class BufferGeometry { setAttribute() {} setIndex() {} computeVertexNormals() {} computeBoundingBox() {} computeBoundingSphere() {} dispose() { this.disposed = true; } }
   class Material { dispose() { this.disposed = true; } }
   class Mesh { constructor(geometry, material) { this.geometry = geometry; this.material = material; this.userData = {}; } }
   const THREE = { Group, BufferGeometry, Float32BufferAttribute: class {}, MeshStandardMaterial: Material, Color: class {}, Mesh, DoubleSide: 2 };
-  let fitted = 0;
-  const layer = createStevePreviewLayer({ THREE, scene, fit: () => { fitted += 1; } });
+  let fitted = 0, restored = 0;
+  const placements = [];
+  const layer = createStevePreviewLayer({ THREE, scene, fit: () => { fitted += 1; },
+    place: (root, snapshot) => {
+      assert.equal(scene.value, root);
+      assert.equal(root.children.length, 1);
+      root.position.x += 100;
+      placements.push({ root, revision: snapshot.revision, restored });
+      return () => { restored++; };
+    } });
   layer.display(packet(), { first: true });
   const first = scene.value;
   layer.display(packet(2));
   assert.equal(fitted, 1);
   assert.deepEqual(removed, [first]);
   assert.equal(first.children[0].geometry.disposed, true);
+  assert.deepEqual(placements.map(p => [p.revision, p.restored]), [[1, 0], [2, 1]]);
+  assert.notEqual(placements[0].root, placements[1].root);
+  layer.refreshPlacement();
+  assert.equal(scene.value.position.x, 100);
+  assert.equal(restored, 2);
+  assert.equal(placements.length, 3);
+  layer.clear();
+  assert.equal(restored, 3);
+  layer.clear();
+  layer.refreshPlacement();
+  assert.equal(restored, 3);
 });
 
 

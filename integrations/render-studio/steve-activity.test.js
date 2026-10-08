@@ -1,9 +1,9 @@
-import { SteveProjectBinding, steveProjectBinding } from './steve-project-binding.js?v=20261008-project-lock-p1';
+import { SteveProjectBinding, steveProjectBinding } from './steve-project-binding.js?v=20261008-completion-placement1';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { SteveActivity, readSteveActivity } from './steve-activity.js';
-import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-project-lock-p1';
+import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-completion-placement1';
 import { SteveDesignChat } from './steve-design-chat.js';
 import { SteveLivePreview } from './steve-live-preview.js';
 
@@ -134,4 +134,24 @@ test('signed activity authentication failures retain pairing and back off subseq
   assert.equal(connector.authFailures, 1); assert.ok(connector.authRetryAt > Date.now());
   await assert.rejects(readSteveActivity(connector, { renderUserId: 'alice', after: 0 }), /authentication/);
   assert.equal(posts, 1); assert.equal(connector.secret, 'retained-secret');
+});
+
+test('activity honors native busy/availability across unchanged revisions and empty deltas', async () => {
+  const f = fixture();
+  f.feed({ ...packet([snapshot()], 1, true), busy: true, availableForProjectChange: false });
+  await f.activity.tick();
+  const state = f.activity.bindingState, generation = state.generation;
+  f.activity.select('request-1');
+  assert.equal(state.busy, true); // Completed records cannot erase export/save work.
+  f.feed({ ...packet([], 2), busy: false, availableForProjectChange: true });
+  await f.activity.tick();
+  assert.equal(state.busy, false);
+  assert.equal(state.availableForProjectChange, true);
+  assert.equal(state.generation, generation);
+  assert.equal(f.activity.selected, 'request-1');
+  assert.equal(f.activity.records.size, 1);
+  f.feed(packet([], 3)); await f.activity.tick();
+  assert.equal(state.availableForProjectChange, false);
+  assert.equal(state.generation, generation);
+  f.activity.dispose();
 });

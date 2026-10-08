@@ -1,8 +1,8 @@
-import { steveProjectBinding, bindingOwns } from './steve-project-binding.js?v=20261008-project-lock-p1';
-import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-project-lock-p1';
-import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-project-lock-p1";
-import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-project-lock-p1";
-import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-project-lock-p1";
+import { steveProjectBinding, bindingOwns } from './steve-project-binding.js?v=20261008-completion-placement1';
+import { mountSteveActivity } from './steve-activity-ui.js?v=20261008-completion-placement1';
+import { SteveLivePreview, createStevePreviewLayer } from "./steve-live-preview.js?v=20261008-completion-placement1";
+import { SteveResultOpener, mountSteveResultAction } from "./steve-result-open.js?v=20261008-completion-placement1";
+import { SteveConnector, mountSteveConnector } from "./steve-connector.js?v=20261008-completion-placement1";
 import { isSteveChatComplete } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 
 const PREFIX = "render3d:steveDesignChat:v1:";
@@ -234,8 +234,8 @@ export function configureSteveActivity(options) {
   });
 }
 
-export function configureSteveLivePreview({ THREE, scene, fit, getOwner }) {
-  const layer = createStevePreviewLayer({ THREE, scene, fit });
+export function configureSteveLivePreview({ THREE, scene, fit, place, getOwner }) {
+  const layer = createStevePreviewLayer({ THREE, scene, fit, place });
   const connector = new SteveConnector();
   const preview = new SteveLivePreview({ getOwner, getBinding: () => steveProjectBinding.binding, post: packet => connector.preview(packet), ...layer,
     onError: (error, owner) => {
@@ -269,6 +269,7 @@ export function configureSteveLivePreview({ THREE, scene, fit, getOwner }) {
     window.removeEventListener("render3d:auth-session", reset);
     window.removeEventListener("render3d:project-changed", reset);
   }, { once: true });
+  preview.refreshPlacement = layer.refreshPlacement;
   return preview;
 }
 

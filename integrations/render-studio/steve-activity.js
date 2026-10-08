@@ -1,5 +1,5 @@
-import { steveProjectBinding, validateSteveBinding, bindingOwns } from './steve-project-binding.js?v=20261008-project-lock-p1';
-import { signSteveSubmission } from './steve-connector.js?v=20261008-project-lock-p1';
+import { steveProjectBinding, validateSteveBinding, bindingOwns } from './steve-project-binding.js?v=20261008-completion-placement1';
+import { signSteveSubmission } from './steve-connector.js?v=20261008-completion-placement1';
 
 export async function readSteveActivity(connector, { renderUserId, after }, signal) {
   if (!renderUserId || !Number.isSafeInteger(after) || after < 0) throw new Error('Invalid STEVE activity scope.');
@@ -52,6 +52,7 @@ export class SteveActivity {
     bindingState = steveProjectBinding, schedule = globalThis.setTimeout.bind(globalThis), cancel = globalThis.clearTimeout.bind(globalThis) }) {
     Object.assign(this, { getUserId, read, ingest, onChange, onAvailability, schedule, cancel });
     this.bindingState = bindingState;
+    this.bindingGeneration = bindingState.generation;
     this.unsubscribeBinding = bindingState.subscribe(() => {
       if (this.bindingGeneration === bindingState.generation) return;
       this.bindingGeneration = bindingState.generation;
@@ -119,8 +120,7 @@ export class SteveActivity {
       this.cards = this.cards.filter(card => this.records.has(card.requestId));
       if (!this.records.has(this.selected)) this.selected = null;
       this.cursor = packet.cursor; this.initialized = true;
-      this.bindingState.busy = [...this.records.values()].some(record => !['completed', 'failed', 'stopped', 'cancelled', 'canceled'].includes(record.phase));
-      this.bindingState.emit(); this.onChange(this);
+      this.onChange(this);
     } finally { if (this.pending === controller) this.pending = null; }
   }
   start() {

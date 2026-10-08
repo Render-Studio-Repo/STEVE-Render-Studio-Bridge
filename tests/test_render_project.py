@@ -624,6 +624,38 @@ class ProjectTests(unittest.TestCase):
             bridge.feed.save_status('done', {'state': 'saved'}, 'completed')
             self.assertTrue(packet()['availableForProjectChange'])
 
+    def test_required_availability_rechecks_failed_request_between_get_and_bind(self):
+        bridge = ExternalBridge(lambda: None)
+        binding = self.bind(bridge)
+        bridge.feed.accept('first', 'Build', 'one', 'alice')
+        bridge.feed.observe({'bridgeRequestId': 'first', 'status': 'Ready'})
+        self.assertTrue(bridge.project_request({'action': 'get'})['availableForProjectChange'])
+        automatic = {'action': 'bind', 'renderUserId': 'alice', 'renderProjectId': 'two',
+                     'expectedRevision': binding['revision'], 'requireAvailable': True}
+        bridge._enqueue(Submission('second', 'Next', None, None, None, 'one', 'alice', binding['revision']), 'hash')
+        self.error('project_busy', lambda: bridge.project_request(automatic))
+        bridge.drain_commands()
+        bridge.feed.fail('second', 'New request failed')
+        self.assertEqual(bridge.project.binding.public(), binding)
+        self.error('project_not_finished', lambda: bridge.project_request(automatic))
+        self.assertEqual(bridge.project.binding.public(), binding)
+        manual = {key: value for key, value in automatic.items() if key != 'requireAvailable'}
+        self.assertEqual(bridge.project_request(manual)['binding']['renderProjectId'], 'two')
+
+    def test_required_availability_validates_flag_and_accepts_completed_request(self):
+        bridge = ExternalBridge(lambda: None)
+        binding = self.bind(bridge)
+        payload = {'action': 'bind', 'renderUserId': 'alice', 'renderProjectId': 'two',
+                   'expectedRevision': binding['revision'], 'requireAvailable': True}
+        self.error('project_not_finished', lambda: bridge.project_request(payload))
+        for value in [None, 'true', 1, [], {}]:
+            with self.subTest(value=value), self.assertRaises(BridgeError) as error:
+                bridge.project_request({**payload, 'requireAvailable': value})
+            self.assertEqual(error.exception.status, 400)
+        bridge.feed.accept('done', 'Build', 'one', 'alice')
+        bridge.feed.observe({'bridgeRequestId': 'done', 'status': 'Ready'})
+        self.assertEqual(bridge.project_request(payload)['binding']['renderProjectId'], 'two')
+
     def test_retained_request_id_cannot_overwrite_dispatch_reservation(self):
         bridge = ExternalBridge(lambda: None)
         first = self.bind(bridge)

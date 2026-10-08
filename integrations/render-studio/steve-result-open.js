@@ -1,4 +1,4 @@
-import { steveProjectBinding } from './steve-project-binding.js?v=20261008-project-lock-p1';
+import { steveProjectBinding } from './steve-project-binding.js?v=20261008-completion-placement1';
 
 export function savedSteveResult(record) {
   const save = record.snapshot?.save;

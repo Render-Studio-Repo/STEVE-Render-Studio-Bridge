@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
-import { SteveProjectBinding, steveProjectBinding, bindingError } from './steve-project-binding.js?v=20261008-project-lock-p1';
+import { SteveProjectBinding, steveProjectBinding, bindingError } from './steve-project-binding.js?v=20261008-completion-placement1';
 import { SteveActivity } from './steve-activity.js';
-import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-project-lock-p1';
+import { SteveConnector, signSteveSubmission } from './steve-connector.js?v=20261008-completion-placement1';
 import { SteveDesignChat } from './steve-design-chat.js';
 import { SteveLivePreview } from './steve-live-preview.js';
 
@@ -157,7 +157,7 @@ test('late get cannot restore an obsolete native binding', async () => {
 });
 
 test('lock UI navigation never writes; cancel and idle confirmation use the captured CAS', async () => {
-  const { mountSteveActivity } = await import('./steve-activity-ui.js?v=20261008-project-lock-p1');
+  const { mountSteveActivity } = await import('./steve-activity-ui.js?v=20261008-completion-placement1');
   class Node {
     constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.attrs = {}; this.handlers = new Map();
       this.hidden = false; this.disabled = false; this.value = ''; this.textContent = ''; this.scrollHeight = 0; this.scrollTop = 0; this.clientHeight = 0; }
@@ -245,4 +245,101 @@ test('reset while failed confirmation rereads native authority rejects the recov
   await entered; state.reset(); state.accept(bound('project-b', 'new-session'));
   releaseRecovery(bound()); await result;
   assert.equal(state.binding.revision, 'new-session'); assert.equal(state.changing, false);
+});
+
+test('native availability updates at the same revision without advancing ownership generation', async () => {
+  const state = new SteveProjectBinding();
+  state.accept({ ...bound(), busy: false, availableForProjectChange: false });
+  const generation = state.generation;
+  let notifications = 0; state.subscribe(() => notifications++);
+  await state.refresh({ status: { busy: true, queueDepth: 8 },
+    project: async () => ({ ...bound(), busy: false, availableForProjectChange: true }) });
+  assert.equal(state.generation, generation);
+  assert.equal(state.busy, false);
+  assert.equal(state.availableForProjectChange, true);
+  state.accept({ ...bound(), busy: true, availableForProjectChange: false });
+  assert.equal(state.generation, generation);
+  assert.equal(state.busy, true);
+  assert.equal(state.availableForProjectChange, false);
+  assert.equal(notifications, 2);
+});
+
+test('missing or inconsistent native availability and reset never retain finished eligibility', () => {
+  const state = new SteveProjectBinding();
+  for (const packet of [bound(), { ...bound(), availableForProjectChange: true },
+    { ...bound(), busy: true, availableForProjectChange: true },
+    { version: 1, binding: null, busy: false, availableForProjectChange: true }]) {
+    state.accept({ ...bound(), busy: false, availableForProjectChange: true });
+    state.accept(packet);
+    assert.equal(state.availableForProjectChange, false);
+  }
+  state.accept({ ...bound(), busy: false, availableForProjectChange: true });
+  state.reset();
+  assert.equal(state.availableForProjectChange, false);
+});
+
+test('explicit send claims a finished same-account project with CAS; revisions and busy races never auto-handoff', async () => {
+  const nextOwner = { userId: 'alice', projectId: 'project-b' };
+  const connector = new SteveConnector({ cryptoApi: webcrypto });
+  const calls = [];
+  let native = { ...bound(), busy: false, availableForProjectChange: true }, rejectBind = false;
+  connector.project = async payload => {
+    calls.push(payload);
+    if (payload.action === 'bind') {
+      if (rejectBind) throw bindingError('project_busy');
+      native = { ...bound(payload.renderProjectId, 'revision-b'), busy: false, availableForProjectChange: false };
+    }
+    return native;
+  };
+  try {
+    steveProjectBinding.reset();
+    await steveProjectBinding.refresh(connector); // Navigation only reads.
+    assert.ok(calls.every(call => call.action === 'get'));
+    assert.equal(await connector.prepareSubmission(nextOwner), 'revision-b');
+    assert.deepEqual(calls.find(call => call.action === 'bind'), {
+      action: 'bind', renderUserId: 'alice', renderProjectId: 'project-b', expectedRevision: 'revision-a', requireAvailable: true });
+    for (const [packet, revision, target] of [
+      [{ ...bound(), busy: false, availableForProjectChange: true }, 'revision-a', nextOwner],
+      [bound(), undefined, nextOwner],
+      [{ ...bound(), busy: true, availableForProjectChange: true }, undefined, nextOwner],
+      [{ ...bound(), busy: false, availableForProjectChange: true }, undefined, { ...nextOwner, userId: 'bob' }],
+    ]) {
+      steveProjectBinding.reset(); native = packet; calls.length = 0;
+      await assert.rejects(connector.prepareSubmission(target, revision), { code: 'project_mismatch' });
+      assert.ok(calls.every(call => call.action === 'get'));
+    }
+    steveProjectBinding.reset(); calls.length = 0;
+    native = { ...bound(), busy: false, availableForProjectChange: true }; rejectBind = true;
+    await assert.rejects(connector.prepareSubmission(nextOwner), { code: 'project_busy' });
+    assert.equal(steveProjectBinding.binding.renderProjectId, 'project-a');
+    assert.equal(calls.filter(call => call.action === 'bind').length, 1);
+  } finally { steveProjectBinding.reset(); }
+});
+
+
+test('automatic handoff requires fresh native availability when a newer request fails after GET', async () => {
+  const connector = new SteveConnector({ cryptoApi: webcrypto });
+  const target = { userId: 'alice', projectId: 'project-b' }, calls = [];
+  let native = { ...bound(), busy: false, availableForProjectChange: true };
+  connector.project = async payload => {
+    calls.push(payload);
+    if (payload.action === 'bind') {
+      // A new request failed after the GET: unchanged binding revision, now idle but unfinished.
+      native = { ...bound(), busy: false, availableForProjectChange: false };
+      assert.equal(payload.requireAvailable, true);
+      throw bindingError('project_not_finished');
+    }
+    return native;
+  };
+  try {
+    steveProjectBinding.reset();
+    await assert.rejects(connector.prepareSubmission(target), { code: 'project_not_finished' });
+    assert.equal(steveProjectBinding.binding.renderProjectId, 'project-a');
+    assert.equal(steveProjectBinding.availableForProjectChange, false);
+    assert.equal(calls.filter(call => call.action === 'bind').length, 1);
+    const manual = steveProjectBinding.prepare(target);
+    assert.equal(Object.hasOwn(manual, 'requireAvailable'), false);
+    steveProjectBinding.cancel();
+    assert.equal(Object.hasOwn(steveProjectBinding.prepare(target, { requireAvailable: false }), 'requireAvailable'), false);
+  } finally { steveProjectBinding.reset(); }
 });

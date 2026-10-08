@@ -327,7 +327,9 @@ class ExternalBridge:
                     self._check_authenticated(handler)
                     self._project_available()
                     return self._project_packet(native_busy)
-        if action != 'bind' or set(payload) != {'action', 'renderUserId', 'renderProjectId', 'expectedRevision'}:
+        required = {'action', 'renderUserId', 'renderProjectId', 'expectedRevision'}
+        if (action != 'bind' or not required <= set(payload) or set(payload) - required - {'requireAvailable'}
+                or ('requireAvailable' in payload and type(payload['requireAvailable']) is not bool)):
             raise BridgeError(400, 'invalid_request', 'Invalid project action or fields.')
         user = _text(payload['renderUserId'], 'renderUserId', 256, required=True)
         project = _text(payload['renderProjectId'], 'renderProjectId', 256, required=True)
@@ -344,6 +346,9 @@ class ExternalBridge:
                     return self._project_packet(native_busy)
                 if self._project_busy(native_busy):
                     raise BridgeError(409, 'project_busy', 'Wait for queued work, execution and saves to finish.')
+                if payload.get('requireAvailable') and not (current and
+                        self.feed.project_finished(current.renderProjectId, current.renderUserId)):
+                    raise BridgeError(409, 'project_not_finished', 'STEVE has not finished the current request; keep this project connected.')
                 self.project.replace(ProjectBinding.create(user, project))
                 return self._project_packet(native_busy)
 

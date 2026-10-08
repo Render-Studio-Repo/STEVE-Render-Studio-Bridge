@@ -28,7 +28,7 @@ Streaming chunks update the conversation without producing repeated cards.
 
 ```js
 import { configureSteveActivity, configureSteveLivePreview }
-  from '../cad/steve-design-chat.js?v=20261008-project-lock-p1';
+  from '../cad/steve-design-chat.js?v=20261008-completion-placement1';
 
 configureSteveActivity({
   host: document.getElementById('viewport'),
@@ -78,8 +78,13 @@ The native bridge owns one project binding for the paired Render origin. A visib
 project change never changes that binding. Render displays the locked project name
 and ID, with an explicit action to open it.
 
-To move the connection, use **Change project**, review the old and new IDs, and
-confirm. STEVE refuses a change while work is active or queued. A confirmation from
+After work, preview exports, and saves finish, STEVE becomes available for another
+project. An explicit new Send in a different project of the same account claims
+it with the last binding revision. Browsing never claims it. The previous
+association remains in place until that handoff, so final results stay readable.
+
+Hosts that expose manual project selection can also use **Change project**,
+review the old and new IDs, and confirm. STEVE refuses a change while work is active or queued. A confirmation from
 a stale browser tab cannot replace a newer selection. Cancel leaves the lock intact.
 
 Before recording or submitting a new request, read the authenticated binding and
@@ -108,7 +113,7 @@ In `frontend/studio/app.js`, keep one integration promise for the page lifetime:
 ```js
 let steveIntegrationPromise;
 function getSteveIntegration() {
-  return steveIntegrationPromise ||= import('../cad/steve-design-chat.js?v=20261008-project-lock-p1')
+  return steveIntegrationPromise ||= import('../cad/steve-design-chat.js?v=20261008-completion-placement1')
     .then(mod => mod.mountSteveDesignChat({
       getPrompt: () => composer?.getPromptText?.() || '',
       getFusionStatus: () => api('/api/autodesk/status'),
@@ -221,7 +226,7 @@ In Render's `frontend/components/render-agent.js` (the Design Chat host), import
 
 ```js
 import { steveDesignChat, mountSteveReplyRecovery }
-  from '../cad/steve-design-chat.js?v=20261008-project-lock-p1';
+  from '../cad/steve-design-chat.js?v=20261008-completion-placement1';
 const steveChatOwner = () => ({
   userId: String(currentUserId() || ''),
   projectId: String(getProjectId() || ''),
@@ -284,7 +289,7 @@ Configure this once in the host application:
 
 ```js
 import { configureSteveResultOpening }
-  from '../cad/steve-design-chat.js?v=20261008-project-lock-p1';
+  from '../cad/steve-design-chat.js?v=20261008-completion-placement1';
 configureSteveResultOpening({
   api,
   getOwner: () => ({
@@ -433,3 +438,18 @@ exporter now excludes bodies with no faces and keeps exporting valid geometry.
 The wider Render checks had 99 passes and 8 failures, including failures reproduced
 on pre-edit sources. Its deployment receipt remains unverified; these results do
 not claim the full Render application passes every check.
+
+## Place STEVE assemblies beside existing models
+
+`configureSteveLivePreview` accepts a `place(root, packet)` host callback. Place the
+whole Z-up millimetre assembly on the floor and beside occupied project bounds.
+Return a cleanup function if the host temporarily hides an exact matching saved
+result. The layer restores that visibility before replacing or clearing a preview.
+Each refresh starts from the unshifted root, so translations do not accumulate.
+
+The Render host wiring is in `placement-host.patch`. It reuses
+`seatObjectToFloor` and `placeNewestAssemblyObjectInGrid`. Saved imports enable
+`autoGridPlace` and `seatNewObject`, and disable whole-assembly seating. Existing
+objects keep their transforms. After a saved import finishes, call the returned
+preview controller's `refreshPlacement()` to reconcile the matching catalog object
+without waiting for another geometry revision.

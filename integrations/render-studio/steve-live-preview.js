@@ -1,4 +1,4 @@
-import { bindingOwns } from './steve-project-binding.js?v=20261008-project-lock-p1';
+import { bindingOwns } from './steve-project-binding.js?v=20261008-completion-placement1';
 const sameOwner = (a, b) => Boolean(a?.userId && a?.projectId && a.userId === b?.userId && a.projectId === b?.projectId);
 
 export function validateStevePreview(packet, requestId, afterRevision = 0) {
@@ -64,14 +64,21 @@ export class SteveLivePreview {
 }
 
 // Inject the host's Three instance; do not introduce another WebGL renderer or scene.
-export function createStevePreviewLayer({ THREE, scene, fit = () => {} }) {
-  let root = null;
+export function createStevePreviewLayer({ THREE, scene, fit = () => {}, place = () => {} }) {
+  let root = null, restorePlacement = null, currentPacket = null;
   const dispose = object => object?.traverse(child => {
     child.geometry?.dispose();
     if (Array.isArray(child.material)) child.material.forEach(material => material.dispose());
     else child.material?.dispose();
   });
-  const clear = () => { if (root) { scene.remove(root); dispose(root); root = null; } };
+  const clear = () => { restorePlacement?.(); restorePlacement = null; if (root) { scene.remove(root); dispose(root); root = null; } };
+  const refreshPlacement = () => {
+    if (!root || !currentPacket) return;
+    restorePlacement?.(); restorePlacement = null;
+    root.position?.set(0, 0, 0);
+    root.updateMatrixWorld?.(true);
+    restorePlacement = place(root, currentPacket) || null;
+  };
   const display = (packet, { first = false } = {}) => {
     const next = new THREE.Group();
     next.name = "__steve_live_preview__";
@@ -90,8 +97,10 @@ export function createStevePreviewLayer({ THREE, scene, fit = () => {} }) {
         next.add(mesh);
       }
     } catch (error) { dispose(next); throw error; }
-    clear(); root = next; scene.add(root);
+    clear(); root = next; currentPacket = packet; scene.add(root);
+    try { refreshPlacement(); }
+    catch (error) { clear(); throw error; }
     if (first && packet.bodies.some(body => body.indices.length)) fit(root);
   };
-  return { display, clear };
+  return { display, clear, refreshPlacement };
 }

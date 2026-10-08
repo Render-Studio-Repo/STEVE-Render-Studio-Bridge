@@ -1,0 +1,60 @@
+--- a/frontend/studio/app.js
++++ b/frontend/studio/app.js
+@@ -15957,8 +15957,24 @@
+   getProjects: () => allProjects || [],
+   openProject: (id, isCurrent) => isCurrent() ? openProjectById(id) : Promise.resolve(),
+ });
+-configureSteveLivePreview({
++const steveLiveLayer = configureSteveLivePreview({
+   THREE, scene, fit: object => fitCameraToObject(object),
++  place: (object, packet) => {
++    const owner = { userId: String(currentUser?.id || ""), projectId: String(projectId || "") };
++    const record = steveDesignChat.records(owner).find(item => item.requestId === packet.requestId);
++    const catalog = record?.resultOpen?.result?.filename;
++    const saved = catalog && projectAssembly.list().find(([name]) => name === catalog)?.[1];
++    let restore = null;
++    if (saved && saved.visible !== false) {
++      saved.visible = false;
++      restore = () => { if (!isComponentHidden(catalog)) saved.visible = true; };
++    }
++    try {
++      seatObjectToFloor(object);
++      placeNewestAssemblyObjectInGrid(catalog || "__steve_live_preview__", object);
++      return restore;
++    } catch (error) { restore?.(); throw error; }
++  },
+   style: object => applyCadStyle(object, { filename: "STEVE Fusion live preview", preserveAuthoredColors: true }),
+   getOwner: () => ({ userId: String(currentUser?.id || ""), projectId: String(projectId || "") }),
+ });
+@@ -15969,10 +15985,12 @@
+     if (!isCurrent()) return false;
+     await refreshFiles();
+     if (!isCurrent()) return false;
+-    return loadModel(projectFileUrl(result.project_id, result.filename), result.filename, {
++    const opened = await loadModel(projectFileUrl(result.project_id, result.filename), result.filename, {
+       projectId: result.project_id, catalogFilename: result.filename, label: result.name,
+-      append: true, cacheBust: true, fitView: true, isCurrent,
++      append: true, cacheBust: true, fitView: true, autoGridPlace: true, seatNewObject: true, seatAssembly: false, isCurrent,
+     });
++    if (isCurrent()) steveLiveLayer.refreshPlacement();
++    return opened;
+   },
+ });
+ configureSteveHistorySync({
+@@ -33306,6 +33324,7 @@
+     } catch (_) { }
+   }
+   projectAssembly.add(catalogName, object, { soft: xrPresenting });
++  if (opts.seatNewObject === true && !xrPresenting) seatObjectToFloor(object);
+   if (opts.autoGridPlace === true && append && !opts.editPlacement && !preservePlacement && !xrPresenting) {
+     placeNewestAssemblyObjectInGrid(catalogName, object);
+   }
+@@ -33347,7 +33366,7 @@
+   // models and trapped the studio boot spinner. AR prepares on demand.
+   try { invalidateMobileArCache(); } catch (_) { /* ignore */ }
+   if (opts.fitView !== false && !xrPresenting) {
+-    if (!opts.editPlacement) seatAssemblyToFloor();
++    if (!opts.editPlacement && opts.seatAssembly !== false) seatAssemblyToFloor();
+     if (append && projectAssembly.count() > 1) fitCamera();
+     else fitCameraToComponent(catalogName);
+   }

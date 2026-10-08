@@ -1,4 +1,4 @@
-import { steveProjectBinding, bindingError } from './steve-project-binding.js?v=20261008-project-lock-p1';
+import { steveProjectBinding, bindingError } from './steve-project-binding.js?v=20261008-completion-placement1';
 import { watchSteveChat } from "./steve-chat-feed.js?v=20261008-steve-chat2";
 const DEFAULT_BASE_URL = "http://127.0.0.1:38173";
 const API_VERSION = "/v1";
@@ -503,6 +503,13 @@ export class SteveConnector {
 
   async prepareSubmission(owner, bindingRevision) {
     await steveProjectBinding.refresh(this);
+    const binding = steveProjectBinding.binding;
+    if (bindingRevision === undefined && binding && steveProjectBinding.availableForProjectChange
+      && binding.renderUserId === String(owner?.userId || '')
+      && binding.renderProjectId !== String(owner?.projectId || '')) {
+      steveProjectBinding.prepare(owner, { requireAvailable: true });
+      await steveProjectBinding.confirm(this);
+    }
     return steveProjectBinding.assertOwner(owner, bindingRevision);
   }
 

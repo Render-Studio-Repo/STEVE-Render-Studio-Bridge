@@ -1,11 +1,11 @@
-import { steveProjectBinding, bindingOwns, bindingError } from './steve-project-binding.js?v=20261008-project-lock-p1';
-import { SteveActivity, readSteveActivity } from './steve-activity.js?v=20261008-project-lock-p1';
-import { SteveConnector } from './steve-connector.js?v=20261008-project-lock-p1';
+import { steveProjectBinding, bindingOwns, bindingError } from './steve-project-binding.js?v=20261008-completion-placement1';
+import { SteveActivity, readSteveActivity } from './steve-activity.js?v=20261008-completion-placement1';
+import { SteveConnector } from './steve-connector.js?v=20261008-completion-placement1';
 
 export function mountSteveActivity({ host, getOwner, ingest, onAvailability, openProject, projectLabel = id => id, read, getProjects = () => [], bindingState = steveProjectBinding, projectConnector }) {
   if (!host) return null;
   const link = document.createElement('link');
-  link.rel = 'stylesheet'; link.href = '/cad/steve-activity.css?v=20261008-project-lock-p1'; document.head.append(link);
+  link.rel = 'stylesheet'; link.href = '/cad/steve-activity.css?v=20261008-completion-placement1'; document.head.append(link);
   const root = document.createElement('section'); root.className = 'steve-activity';
   root.setAttribute('aria-label', 'STEVE activity'); host.append(root);
   const cards = document.createElement('div'); cards.className = 'steve-activity-cards'; cards.setAttribute('aria-live', 'polite');
@@ -109,6 +109,7 @@ export function mountSteveActivity({ host, getOwner, ingest, onAvailability, ope
   function renderLock() {
     const binding = bindingState.binding, pending = bindingState.pending;
     badge.textContent = binding ? 'STEVE locked to ' + labelFor(binding.renderProjectId)
+      + (bindingState.availableForProjectChange ? ' · Finished · available for another project' : '')
       : bindingState.known ? 'STEVE is not locked to a project' : 'STEVE project lock unavailable · connect or update STEVE';
     openLocked.hidden = !binding;
     openLocked.disabled = !binding || binding.renderUserId !== String(getOwner().userId || '');
@@ -139,7 +140,7 @@ export function mountSteveActivity({ host, getOwner, ingest, onAvailability, ope
     change.title = busy ? 'Wait for STEVE to finish before changing projects.' : '';
   }
   const unsubscribeLock = bindingState.subscribe(renderLock);
-  const navigation = () => { bindingState.cancel(); renderLock(); };
+  const navigation = () => { bindingState.cancel(); activity.reset(); renderLock(); void activity.tick().catch(() => {}); };
   window.addEventListener('render3d:project-changed', navigation);
   renderLock();
   const reset = () => { bindingState.reset(); activity.reset(); renderLock(); void activity.tick().catch(() => {}); };
